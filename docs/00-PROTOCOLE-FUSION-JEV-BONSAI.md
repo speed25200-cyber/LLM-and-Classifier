@@ -313,13 +313,14 @@ r = g.think_adaptive([{"role": "user", "content": "..."}]); print(r.stopped_by, 
 **Critere de sortie** : sur 50 questions maths/code, -40 % de tokens de reflexion a exactitude egale par
 rapport a `--reasoning-budget 2048` ; `best_of_n` (n=4) >= reflexion complete sur les questions courtes.
 
-### Phase 13 - Jarvis : l'assistant, et son jeu de donnees fabrique a partir de zero
+### Phase 13 - Prophet : l'agent general, et son jeu de donnees fabrique a partir de zero
 
-[11 Jarvis](11-JARVIS.md). `jev jarvis --workspace ~/jarvis` : a chaque tour le clone pre-traite (intention,
-langage, ambiguite, raisonnement, risque), puis reponse courte, question de clarification ou boucle d'agent
-Bonsai avec outils (fichiers, commandes sous garde-fou avec confirmation, memoire, jugements du clone).
-Donnees : 82 graines manuscrites -> synthese par Bonsai (`training/make_synthetic_jarvis.py`) -> etiquetage
-(`distill.py`) -> calibration / entrainement ; puis le journal de Jarvis alimente les cycles suivants.
+[11 Prophet](11-PROPHET.md). `jev prophet --workspace ~/prophet --browser` : Bonsai garde toujours la pleine
+autonomie (code, shell, Python, web, memoire, outils qu'il cree lui-meme) ; le clone juge a chaque tour des
+proprietes (reponse directe possible, budget de reflexion, risque, outils pertinents, risque de chaque action)
+et ne restreint jamais ce que l'agent peut faire.
+Donnees : 82 graines manuscrites -> synthese par Bonsai (`training/make_synthetic_prophet.py`) -> etiquetage
+(`distill.py`) -> calibration / entrainement ; puis le journal de Prophet alimente les cycles suivants.
 **Critere de sortie** : 10 demandes de creation d'application executees de bout en bout (fichiers, tests, lancement)
 avec >= 8 reussites ; 0 commande a risque >= 2 executee sans confirmation ; pre-traitement p50 <= 250 ms.
 
@@ -351,7 +352,7 @@ avec >= 8 reussites ; 0 commande a risque >= 2 executee sans confirmation ; pre-
 | 7 | clone entraine | +10 pts accuracy ; ECE <= 0,04 ; escalade -33 % | `train_lora_rlcd.py` |
 | 6-7 bis | usine A100 | 20 000 etats distilles en < 4 h ; 2B entraine en < 8 h ; GGUF + calibration dans Drive | `colab/jev_bonsai_a100.ipynb` |
 | 10 | agent navigateur | >= 80 % de pas rapides ; reussite >= Bonsai seul ; temps / 3 | `examples/browser_agent.py`, `runs/trajectories.jsonl` |
-| 13 | Jarvis | 8/10 applications creees de bout en bout ; 0 commande risquee sans confirmation | `jev jarvis`, `.jarvis/ledger.jsonl` |
+| 13 | Prophet | 8/10 applications creees de bout en bout ; 0 action risquee sans confirmation ; reponse directe p50 <= 3 s | `jev prophet`, `.prophet/ledger.jsonl` |
 | 12 | generation guidee | -40 % de tokens de reflexion a exactitude egale | `guided.py` |
 | 11 | tableau de bord vs Jev | jev-benchmark >= 93,3 %, 0 erreur a conf >= 0,9 ; MMLU ECE <= 0,03 ; p50 < 100 ms ; couverture conforme verifiee | `eval/`, `conformal.py` |
 | 8 | boucle | ECE par question <= 0,08 ; derive detectee sous 1 mois | ledger + `calibrate.py` |

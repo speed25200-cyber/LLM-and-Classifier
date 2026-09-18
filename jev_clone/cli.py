@@ -48,8 +48,9 @@ def main(argv=None):
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8008)
 
-    j = sub.add_parser("jarvis", help="assistant personnel local a deux vitesses (REPL)")
-    j.add_argument("--workspace", default=os.path.expanduser("~/jarvis"))
+    j = sub.add_parser("prophet", help="Prophet : agent general local a deux vitesses (REPL)")
+    j.add_argument("--workspace", default=os.path.expanduser("~/prophet"))
+    j.add_argument("--browser", action="store_true", help="activer l'outil browse (Playwright)")
     j.add_argument("--s1", default=os.environ.get("JEV_S1_URL", "http://127.0.0.1:8081"))
     j.add_argument("--s2", default=os.environ.get("JEV_S2_URL", "http://127.0.0.1:8080"))
     j.add_argument("--calibration", default=os.environ.get("JEV_CALIBRATION"))
@@ -69,11 +70,12 @@ def main(argv=None):
     from jev_clone.engine import SystemOneEngine
     from jev_clone.readout import Calibration
 
-    if args.cmd == "jarvis":
-        from jev_clone.jarvis import Jarvis, Workspace, confirm_in_terminal, repl
+    if args.cmd == "prophet":
+        from jev_clone.prophet import Prophet, Workspace, confirm_in_terminal, make_browser_factory, repl
         s1 = SystemOneEngine(LlamaCppBackend(args.s1, max_workers=4), calibration=Calibration.load(args.calibration))
         s2 = LlamaCppBackend(args.s2, max_workers=1, timeout=600)
-        repl(Jarvis(s1, s2, Workspace(args.workspace), confirm=(lambda c, j: True) if args.yes else confirm_in_terminal))
+        repl(Prophet(s1, s2, Workspace(args.workspace), confirm=(lambda c, j: True) if args.yes else confirm_in_terminal,
+                     browser_factory=make_browser_factory(s1, s2) if args.browser else None))
         return
 
     if args.cmd == "decide":

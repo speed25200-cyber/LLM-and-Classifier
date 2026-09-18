@@ -48,7 +48,7 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 | `docs/05-COLAB-A100.md` | usine A100 / production 4060 : quoi faire ou, durees, artefacts |
 | `examples/` | routage de tickets avec escalade ; boucle d'agent temps reel ; agent navigateur (`browser_agent.py`) |
 | `docs/06-AGENT-COMPUTER-USE.md` | fusion bidirectionnelle, computer use, budget de latence, ecart honnete avec Jev |
-| `docs/11-JARVIS.md`, `jev_clone/jarvis.py` | **Jarvis** : assistant local a deux vitesses (REPL `jev jarvis`), cree des applications, execute des commandes sous garde-fou, memoire, journal ; `training/seeds/` + `make_synthetic_jarvis.py` : le jeu de donnees fabrique a partir de zero |
+| `docs/11-PROPHET.md`, `jev_clone/prophet.py` | **Prophet** : agent general local a deux vitesses (REPL `jev prophet`) : code, applications, shell, web, memoire, outils qu'il cree lui-meme ; le clone juge des proprietes (reponse directe, budget, risque, outils pertinents), jamais des cases ; `training/seeds/` + `make_synthetic_prophet.py` : le jeu de donnees fabrique a partir de zero |
 | `docs/10-CAS-D-USAGE.md`, `jev_clone/presets.py` | routage, choix de competence, reranking, garde-fous, extraction typee : schemas prets a l'emploi ; `ledger_report.py` (economies mesurees) ; `training/make_from_history.py` (votre historique -> entrainement) |
 | `docs/09-FUSION-PROFONDE.md` | les trois niveaux de fusion (systeme, inference, modele), ce qui est fait, ce que "SOTA a 8 Go" veut dire, RTX 5060 |
 | `jev_clone/guided.py` | System One pilote la generation de Bonsai : reflexion adaptative, meilleur de N, reponse verifiee |
@@ -57,7 +57,7 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 | `eval/` | banc de mesure : les 60 cas et les sorties reelles de Jev (jev-benchmark) mesures avec le meme code que le clone ; MMLU-1200 |
 | `jev_clone/conformal.py` | ensembles de prediction conformes (couverture garantie) et porte a risque controle |
 | `jev_clone/engine_torch.py` | moteur en passe unique (toutes les questions en un forward), cible < 50 ms |
-| `tests/` | 55 tests (hors ligne, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
+| `tests/` | 56 tests (hors ligne, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
 
 ## Ce qui est verifie / ce qui ne l'est pas
 * Verifie ici : le paquet `jev_clone` (tests unitaires), l'agent navigateur sur une page locale (Playwright), la lecture par grammaire et le cache de prefixe
