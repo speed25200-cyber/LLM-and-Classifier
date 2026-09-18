@@ -144,6 +144,28 @@ class LlamaCppBackend:
             out = list(ex.map(lambda b: self.score_branch(prefix, b), rest))
         return [first] + out
 
+    # ---- acces bas niveau : gabarit de chat et completion brute par morceaux ----------------------
+    def apply_template(self, messages: list[dict], **kw) -> str:
+        """Rend les messages avec le gabarit de chat du modele (llama-server /apply-template)."""
+        r = self._session.post(f"{self.base_url}/apply-template", json={"messages": messages, **kw}, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()["prompt"]
+
+    def complete(self, prompt: str, n_predict: int = 256, stop: list[str] | None = None, temperature: float = 0.7,
+                 top_p: float = 0.95, top_k: int = 20, extra: dict | None = None) -> dict:
+        """Completion brute (texte -> texte) avec cache de prefixe. Renvoie {content, stop_type, tokens, timings}.
+        stop_type : "limit" (n_predict atteint), "word" (un mot d'arret vu), "eos"."""
+        payload = {"prompt": prompt, "n_predict": n_predict, "cache_prompt": True, "temperature": temperature,
+                   "top_p": top_p, "top_k": top_k, "stop": stop or [], "id_slot": self.id_slot}
+        if extra:
+            payload.update(extra)
+        payload = self._with_lora(payload)
+        r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
+        r.raise_for_status()
+        d = r.json()
+        return {"content": d.get("content", ""), "stop_type": d.get("stop_type", ""), "stopping_word": d.get("stopping_word", ""),
+                "tokens": int(d.get("tokens_predicted", 0) or 0), "timings": d.get("timings", {}) or {}}
+
     # ---- System Two : generation classique (pour la fusion) ---------------------------------
     def chat(self, messages: list[dict], max_tokens: int = 512, thinking_budget: int | None = None,
              temperature: float = 0.7, tools: list | None = None, extra: dict | None = None) -> dict:

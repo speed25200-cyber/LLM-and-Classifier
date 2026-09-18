@@ -146,6 +146,8 @@ def main():
     ap.add_argument("--permutations", type=int, default=2)
     ap.add_argument("--qlora", action="store_true", help="base en 4-bit (bitsandbytes) : obligatoire pour 2B/4B sur 8 Go")
     ap.add_argument("--full", action="store_true", help="fine-tuning complet (pas de LoRA) : A100 80 Go, 2B/4B")
+    ap.add_argument("--sft-data", help="JSONL {prompt, response} (reponses distillees de Bonsai) : le meme modele apprend aussi a generer")
+    ap.add_argument("--sft-ratio", type=float, default=0.3, help="part des pas d'optimisation consacres a la generation")
     ap.add_argument("--max-train", type=int, default=0, help="plafonner le nombre de branches d'entrainement (0 = tout)")
     ap.add_argument("--save-every", type=int, default=0, help="sauvegarder un point de reprise tous les N pas (0 = fin seulement)")
     ap.add_argument("--chat", action="store_true", default=True, help="format ChatML + <think></think> (identique au serveur)")
@@ -182,6 +184,15 @@ def main():
         model.print_trainable_parameters()
 
     fmt = PromptFormat(chat=args.chat, no_think=True)
+    sft_rows = []
+    if args.sft_data:
+        with open(args.sft_data) as f:
+            for line in f:
+                if line.strip():
+                    ex = json.loads(line)
+                    sft_rows.append((f"<|im_start|>user\n{ex['prompt']}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                                     ex["response"] + "<|im_end|>"))
+        print(f"{len(sft_rows)} exemples de generation (SFT)")
     train_rows = load_examples(args.data, fmt, args.permutations, args.seed)
     if args.max_train:
         random.Random(args.seed).shuffle(train_rows); train_rows = train_rows[:args.max_train]
@@ -202,10 +213,29 @@ def main():
 
     rng = random.Random(args.seed)
     step, t0 = 0, time.perf_counter()
+
+    def sft_loss(batch_rows):
+        """Perte causale standard sur les tokens de la reponse seulement (prompt masque)."""
+        texts = [p + r for p, r in batch_rows]
+        enc = tok(texts, return_tensors="pt", padding=True, truncation=True, max_length=args.max_len, padding_side="right")
+        labels = enc["input_ids"].clone()
+        for j, (p, _) in enumerate(batch_rows):
+            n_prompt = len(tok(p, add_special_tokens=False)["input_ids"])
+            labels[j, :n_prompt] = -100
+        labels[enc["attention_mask"] == 0] = -100
+        enc = {k: v.to(device) for k, v in enc.items()}
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return model(**enc, labels=labels.to(device)).loss
+
     for epoch in range(args.epochs):
         rng.shuffle(train_rows)
         model.train()
         for micro, i in enumerate(range(0, len(train_rows), args.bs)):
+            if sft_rows and rng.random() < args.sft_ratio:
+                (sft_loss(rng.sample(sft_rows, min(args.bs, len(sft_rows)))) / args.accum).backward()
+                if (micro + 1) % args.accum == 0:
+                    torch.nn.utils.clip_grad_norm_(params, 1.0); opt.step(); sched.step(); opt.zero_grad(set_to_none=True); step += 1
+                continue
             chunk = train_rows[i:i + args.bs]
             enc, last = collate(tok, chunk, args.max_len)
             enc = {k: v.to(device) for k, v in enc.items()}

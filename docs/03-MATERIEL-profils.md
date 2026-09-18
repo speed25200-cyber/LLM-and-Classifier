@@ -28,6 +28,14 @@ de ~60 tokens chacune) : ~40-80 ms ; premiere requete sur un nouvel etat : + ~10
 En mode "mono" sur Bonsai 2 PTQ1_0 : ~0,8-1,5 s pour un nouvel etat (prefill lent), ~150-300 ms si l'etat
 est en cache. Ces ordres de grandeur sont **a mesurer** : `jev bench --server ...`.
 
+### RTX 5060 (8 Go) et 5060 Ti (8 / 16 Go)
+
+Meme VRAM que la 4060, donc memes profils et memes modeles ; bande passante 448 Go/s contre 272 (decodage
+~1,6x plus rapide : Bonsai 2 PTQ1_0 ~45-50 tok/s estimes, Bonsai-27B 1-bit ~60-70), Blackwell `sm_120` :
+`setup.sh` choisit la build CUDA 12.8 (ou 13.3) du fork ; pilote NVIDIA >= 570 requis. Mesure communautaire
+la plus proche : 5060 Ti 16 Go, Ternary-Bonsai-27B PQ2_0, 44,4 tok/s et 1 029 tok/s de prefill. La 5060 Ti
+16 Go prend le profil `gpu-16gb.env` (PQ2_0, contexte 64 k, clone 8B).
+
 ## 2. Matrice des profils
 
 | Profil (`scripts/profiles/`) | Materiel | System Two (Bonsai) | System One (clone) | Contexte | VRAM / RAM estimee | Generation attendue |

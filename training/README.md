@@ -48,6 +48,14 @@ c'est la recette de decider (2B, 183 M tokens, 2,5 h sur GH200 ; compter 4-6 h s
 est ecrit dans `runs/jev-clone/merged/`, directement convertible en GGUF. `colab/jev_bonsai_a100.ipynb` enchaine
 tout (Bonsai enseignant, donnees, entrainement, export, calibration, copie sur Drive).
 
+## 2 ter. Un seul petit modele "Jev + LLM" (fusion au niveau modele)
+
+Le meme backbone peut apprendre les deux modes : decisions calibrees (lecture restreinte) **et** generation
+de reponses courtes distillees de Bonsai. `--sft-data data/gen.jsonl` (`{"prompt", "response"}`, reponses
+produites par Bonsai 2 sur vos invites) et `--sft-ratio 0.3` melangent une perte causale standard sur la
+reponse (invite masquee) aux pas de decision. Resultat : sur la 4060, le modele rapide repond seul aux
+demandes simples et decide en une passe ; Bonsai n'est appele que pour le raisonnement long.
+
 ## 3. Export vers llama.cpp (pour servir avec `scripts/start_jev_clone.sh`)
 
 ```bash

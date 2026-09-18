@@ -76,6 +76,7 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 | `scripts/profiles/*.env` | choix des modeles, contexte, offload, KV4, budgets | `setup.sh`, `start_bonsai.sh`, `start_jev_clone.sh`, `bench.sh` | - | - |
 | `training/` | RLCD-lite : LoRA/QLoRA + regle de score propre + KL enseignant, export GGUF | `train_lora_rlcd.py` | - | - |
 | `jev_clone/tools.py`, `computer_use.py` | Bonsai consulte le clone (outils `judge_*`), boucle d'agent, agent navigateur a deux vitesses | `AgentLoop`, `ComputerUseAgent`, `examples/browser_agent.py` | - | - |
+| `jev_clone/guided.py` | System One dans la boucle de decodage de Bonsai : reflexion adaptative, meilleur de N, reponse verifiee | `GuidedGenerator` | - | - |
 | (optionnel) adaptateur OrcaBonsai | ablation de refus a l'execution sur Bonsai 2 (poids inchanges), echelle reglable par requete | `scripts/fetch_orcabonsai.sh`, profil `rtx4060-8gb-orcabonsai.env`, `BONSAI_LORA` | 9,7 Mo | - |
 
 ## 3. Phases
@@ -296,6 +297,19 @@ Puis garanties formelles sur vos donnees (ensembles conformes, porte a risque co
 **Critere de sortie** : colonnes du tableau de bord remplies ; sur jev-benchmark, accuracy >= 93,3 % et 0 erreur a
 confiance >= 0,9 sur 5 runs ; MMLU-1200 ECE <= 0,03 ; p50 < 100 ms.
 
+### Phase 12 - Fusion au niveau de l'inference : System One pilote la generation de Bonsai
+
+[09 Fusion profonde](09-FUSION-PROFONDE.md). `jev_clone/guided.py` : `think_adaptive` (le clone arrete la
+reflexion de Bonsai des que la reponse est determinee ou que le raisonnement tourne en rond), `best_of_n`
+(N candidats classes par le clone en une passe), `verified` (verification puis seconde tentative).
+```python
+from jev_clone.guided import GuidedGenerator
+g = GuidedGenerator(LlamaCppBackend(JEV_S2_URL, max_workers=1), s1_engine, check_every=192, max_think=4096)
+r = g.think_adaptive([{"role": "user", "content": "..."}]); print(r.stopped_by, r.think_tokens, r.answer)
+```
+**Critere de sortie** : sur 50 questions maths/code, -40 % de tokens de reflexion a exactitude egale par
+rapport a `--reasoning-budget 2048` ; `best_of_n` (n=4) >= reflexion complete sur les questions courtes.
+
 ### Phase 9 - Exploitation
 
 * **Ordre de demarrage** : Bonsai d'abord (gros allocataire), puis le clone, puis `jev serve`. Verifier
@@ -324,6 +338,7 @@ confiance >= 0,9 sur 5 runs ; MMLU-1200 ECE <= 0,03 ; p50 < 100 ms.
 | 7 | clone entraine | +10 pts accuracy ; ECE <= 0,04 ; escalade -33 % | `train_lora_rlcd.py` |
 | 6-7 bis | usine A100 | 20 000 etats distilles en < 4 h ; 2B entraine en < 8 h ; GGUF + calibration dans Drive | `colab/jev_bonsai_a100.ipynb` |
 | 10 | agent navigateur | >= 80 % de pas rapides ; reussite >= Bonsai seul ; temps / 3 | `examples/browser_agent.py`, `runs/trajectories.jsonl` |
+| 12 | generation guidee | -40 % de tokens de reflexion a exactitude egale | `guided.py` |
 | 11 | tableau de bord vs Jev | jev-benchmark >= 93,3 %, 0 erreur a conf >= 0,9 ; MMLU ECE <= 0,03 ; p50 < 100 ms ; couverture conforme verifiee | `eval/`, `conformal.py` |
 | 8 | boucle | ECE par question <= 0,08 ; derive detectee sous 1 mois | ledger + `calibrate.py` |
 
