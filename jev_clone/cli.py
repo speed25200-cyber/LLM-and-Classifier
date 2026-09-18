@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -47,6 +48,13 @@ def main(argv=None):
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8008)
 
+    j = sub.add_parser("jarvis", help="assistant personnel local a deux vitesses (REPL)")
+    j.add_argument("--workspace", default=os.path.expanduser("~/jarvis"))
+    j.add_argument("--s1", default=os.environ.get("JEV_S1_URL", "http://127.0.0.1:8081"))
+    j.add_argument("--s2", default=os.environ.get("JEV_S2_URL", "http://127.0.0.1:8080"))
+    j.add_argument("--calibration", default=os.environ.get("JEV_CALIBRATION"))
+    j.add_argument("--yes", action="store_true", help="ne jamais demander de confirmation (dangereux)")
+
     b = sub.add_parser("bench")
     b.add_argument("--server", default="http://127.0.0.1:8081")
     b.add_argument("--n", type=int, default=20)
@@ -60,6 +68,13 @@ def main(argv=None):
     from jev_clone.backend_llamacpp import LlamaCppBackend
     from jev_clone.engine import SystemOneEngine
     from jev_clone.readout import Calibration
+
+    if args.cmd == "jarvis":
+        from jev_clone.jarvis import Jarvis, Workspace, confirm_in_terminal, repl
+        s1 = SystemOneEngine(LlamaCppBackend(args.s1, max_workers=4), calibration=Calibration.load(args.calibration))
+        s2 = LlamaCppBackend(args.s2, max_workers=1, timeout=600)
+        repl(Jarvis(s1, s2, Workspace(args.workspace), confirm=(lambda c, j: True) if args.yes else confirm_in_terminal))
+        return
 
     if args.cmd == "decide":
         args.instructions = dict(kv.split("=", 1) for kv in args.instruction)
