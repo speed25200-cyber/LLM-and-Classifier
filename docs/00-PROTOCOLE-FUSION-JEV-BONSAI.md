@@ -199,6 +199,9 @@ Questions "meta" a ajouter a **chaque** schema applicatif (c'est ce qui fait la 
 "risk":            {"type": "score", "instructions": "How costly would a wrong automated decision be?",
                     "criteria": ["harmless / reversible", "annoying", "costly", "dangerous or irreversible"]}
 ```
+Schemas prets a l'emploi dans `jev_clone/presets.py` (routage, competences, reranking, garde-fous, extraction,
+tri de tickets) ; economies mesurees par `python -m jev_clone.ledger_report runs/ledger.jsonl` ; historique de
+decisions -> exemples par `training/make_from_history.py` ([10 Cas d'usage](10-CAS-D-USAGE.md)).
 Patrons d'usage couverts : classification / routage (choice + porte), detection (noul), notation
 (score), moderation et securite d'appels d'outils (noul + risque -> Bonsai), reranking / retrieval (score
 par document, tous en parallele), agent temps reel (choice d'action a 10 Hz, Bonsai en arriere-plan
