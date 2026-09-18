@@ -75,6 +75,7 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 | `jev_clone` (Python) | contrat `/v1/systemone`, lecture par grammaire, temperature, confiance, permutations, routeur de fusion, calibration, distillation, ledger | `jev serve` (FastAPI), `jev decide`, `jev bench` | - | 8008 |
 | `scripts/profiles/*.env` | choix des modeles, contexte, offload, KV4, budgets | `setup.sh`, `start_bonsai.sh`, `start_jev_clone.sh`, `bench.sh` | - | - |
 | `training/` | RLCD-lite : LoRA/QLoRA + regle de score propre + KL enseignant, export GGUF | `train_lora_rlcd.py` | - | - |
+| `jev_clone/tools.py`, `computer_use.py` | Bonsai consulte le clone (outils `judge_*`), boucle d'agent, agent navigateur a deux vitesses | `AgentLoop`, `ComputerUseAgent`, `examples/browser_agent.py` | - | - |
 
 ## 3. Phases
 
@@ -258,6 +259,24 @@ taux d'escalade et les latences de la fusion complete avant la mise en productio
 5. Suivre : taux d'escalade, latence p50/p95 par chemin, ECE par question, accord S1/S2 sur les cas
    escalades (si S1 avait raison a >= 95 % sur une question, baisser son seuil).
 
+### Phase 10 - Agent a deux vitesses et computer use (apres la phase 5)
+
+Voir [06 Agent et computer use](06-AGENT-COMPUTER-USE.md). Les deux sens de la fusion sont codes :
+* **Bonsai consulte le clone** : `SystemOneToolbox` expose `judge_choice / judge_noul / judge_score /
+  judge_rank / judge_batch` comme outils OpenAI ; `AgentLoop` execute la boucle d'appels d'outils de
+  Bonsai (outils du clone + outils applicatifs), journal compris.
+* **Computer use navigateur** : `ComputerUseAgent` = observation Playwright (DOM/ARIA) -> `FastPolicy`
+  (clone : action + element cible + slot en une requete) -> execution -> verification (noul) ->
+  escalade `SlowPolicy` (Bonsai avec outils click/type/scroll/back/done + judge_*). Les trajectoires
+  deviennent des exemples d'entrainement (`trajectory_to_examples`, boucle DAgger).
+
+```bash
+pip install -e ".[agent]"
+python examples/browser_agent.py --url https://example.com --goal "Open the 'More information' link" --headed
+```
+**Critere de sortie** : sur 20 taches navigateur simples (formulaire, recherche, navigation), >= 80 % de
+pas decides par le clone, taux de reussite >= celui de Bonsai seul, temps par tache divise par >= 3.
+
 ### Phase 9 - Exploitation
 
 * **Ordre de demarrage** : Bonsai d'abord (gros allocataire), puis le clone, puis `jev serve`. Verifier
@@ -285,6 +304,7 @@ taux d'escalade et les latences de la fusion complete avant la mise en productio
 | 6 | distillation | >= 2 000 etats etiquetes ; accord soft/think >= 85 % sur cas surs | `distill.py` |
 | 7 | clone entraine | +10 pts accuracy ; ECE <= 0,04 ; escalade -33 % | `train_lora_rlcd.py` |
 | 6-7 bis | usine A100 | 20 000 etats distilles en < 4 h ; 2B entraine en < 8 h ; GGUF + calibration dans Drive | `colab/jev_bonsai_a100.ipynb` |
+| 10 | agent navigateur | >= 80 % de pas rapides ; reussite >= Bonsai seul ; temps / 3 | `examples/browser_agent.py`, `runs/trajectories.jsonl` |
 | 8 | boucle | ECE par question <= 0,08 ; derive detectee sous 1 mois | ledger + `calibrate.py` |
 
 ## 5. Risques et parades
