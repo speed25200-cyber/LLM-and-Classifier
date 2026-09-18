@@ -156,8 +156,13 @@ class AgentLoop:
         stopped = "max_turns"
         for turn in range(self.max_turns):
             t0 = time.perf_counter()
-            resp = self.s2.chat(msgs, max_tokens=self.max_tokens, thinking_budget=budget, temperature=0.2,
-                                tools=self.tool_definitions())
+            try:
+                resp = self.s2.chat(msgs, max_tokens=self.max_tokens, thinking_budget=budget, temperature=0.2,
+                                    tools=self.tool_definitions())
+            except Exception as e:  # serveur indisponible, contexte depasse malgre les reessais... : on rend la main proprement
+                steps.append(AgentStep(turn=turn, content=f"[erreur du modele de raisonnement : {str(e)[:200]}]",
+                                       ms=round((time.perf_counter() - t0) * 1000, 1)))
+                stopped = "error"; break
             msg = resp["choices"][0]["message"]
             step = AgentStep(turn=turn, content=msg.get("content"), reasoning=msg.get("reasoning_content"))
             calls = msg.get("tool_calls") or []

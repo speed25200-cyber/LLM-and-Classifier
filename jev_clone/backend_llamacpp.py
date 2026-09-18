@@ -242,6 +242,20 @@ class LlamaCppBackend:
         if extra:
             payload.update(extra)
         payload = self._with_lora(payload)
-        r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
+        # Si la demande depasse le contexte du slot (prompt + max_tokens > n_ctx), llama-server repond 500 ;
+        # on reduit max_tokens et on reessaie plutot que de faire echouer tout le tour de l'agent.
+        for attempt in range(4):
+            r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
+            if r.status_code < 400:
+                return r.json()
+            msg = ""
+            try:
+                msg = json.dumps(r.json())
+            except Exception:
+                msg = r.text
+            if r.status_code == 500 and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
+                payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
+                continue
+            r.raise_for_status()
         r.raise_for_status()
         return r.json()
