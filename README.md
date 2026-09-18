@@ -27,6 +27,8 @@ export JEV_S1_URL=http://127.0.0.1:8081 JEV_S2_URL=http://127.0.0.1:8080
 jev serve --port 8008            # POST /v1/systemone (format TypeSafe) et POST /v1/fusion/decide
 ```
 Sans GPU : `PROFILE=scripts/profiles/minimal-cpu.env` (Bonsai-8B 1-bit + clone 1.7B, 8 Go de RAM).
+Avec une **A100 80 Go sur Colab** : ouvrir `colab/jev_bonsai_a100.ipynb` pour distiller Bonsai et entrainer
+le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 4060 (voir `docs/05-COLAB-A100.md`).
 
 ## Contenu du depot
 | Chemin | Contenu |
@@ -38,7 +40,9 @@ Sans GPU : `PROFILE=scripts/profiles/minimal-cpu.env` (Bonsai-8B 1-bit + clone 1
 | `docs/04-REFERENCES.md` | sources |
 | `jev_clone/` | le clone : `schema` (contrat), `prompt` (prefixe + branches), `backend_llamacpp` (lecture par grammaire), `readout` (temperature, confiance), `engine`, `calibrate`, `distill`, `fusion` (routeur), `server`, `cli` |
 | `scripts/` | `setup.sh`, `start_bonsai.sh`, `start_jev_clone.sh`, `bench.sh`, `profiles/*.env`, `windows/*.ps1` |
-| `training/` | `train_lora_rlcd.py` (LoRA/QLoRA + regle de score propre + distillation) et sa notice |
+| `training/` | `train_lora_rlcd.py` (LoRA / QLoRA / `--full` + regle de score propre + distillation), `make_public_mix.py` (jeux publics -> JSONL) et sa notice |
+| `colab/` | notebook A100 80 Go : installation, Bonsai enseignant, distillation, entrainement complet, export GGUF, calibration, copie vers Drive |
+| `docs/05-COLAB-A100.md` | usine A100 / production 4060 : quoi faire ou, durees, artefacts |
 | `examples/` | routage de tickets avec escalade ; boucle d'agent temps reel |
 | `tests/` | 23 tests (hors ligne + integration contre un `llama-server` reel) |
 

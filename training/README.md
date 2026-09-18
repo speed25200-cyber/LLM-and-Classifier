@@ -36,6 +36,18 @@ reduction "RL pour decisions calibrees" quand la politique emet la distribution 
 Cibles de validation (jeu tenu a l'ecart) : accuracy >= niveau 0 + 10 points sur vos questions,
 **ECE <= 0.05**, Brier en baisse, precision selective >= 95 % a >= 70 % de couverture.
 
+## 2 bis. Avec une A100 80 Go (Colab) : fine-tuning complet
+
+```bash
+python training/make_public_mix.py --out data/public_train.jsonl --val data/public_val.jsonl --per-task 8000
+python training/train_lora_rlcd.py --model Qwen/Qwen3.5-2B-Base --full --data data/train.jsonl --val data/val.jsonl \
+    --out runs/jev-clone --bs 16 --accum 2 --max-len 1536 --loss nll --kl 0.5 --permutations 2 --save-every 500
+```
+`--full` entraine tous les poids en bf16 (etats AdamW en fp32 : ~24 Go pour 2B + activations), lr plafonne a 2e-5 ;
+c'est la recette de decider (2B, 183 M tokens, 2,5 h sur GH200 ; compter 4-6 h sur A100). Le modele complet
+est ecrit dans `runs/jev-clone/merged/`, directement convertible en GGUF. `colab/jev_bonsai_a100.ipynb` enchaine
+tout (Bonsai enseignant, donnees, entrainement, export, calibration, copie sur Drive).
+
 ## 3. Export vers llama.cpp (pour servir avec `scripts/start_jev_clone.sh`)
 
 ```bash

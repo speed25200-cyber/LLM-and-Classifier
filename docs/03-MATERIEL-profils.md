@@ -39,10 +39,15 @@ est en cache. Ces ordres de grandeur sont **a mesurer** : `jev bench --server ..
 | `rtx4060-8gb-mono.env` | 8 Go | Bonsai 2 27B PTQ1_0 | **Bonsai lui-meme** (lecture par grammaire) | 8 k (KV4), 3 slots | ~6,8 Gio | idem ; decisions plus lentes mais meilleures |
 | `gpu-12gb.env` | 12 Go (RTX 3060 12 Go, 4070) | Bonsai 2 27B PQ2_0 + vision sur GPU | Ternary-Bonsai-4B | 32 k (KV4) | ~10,5 Gio | ~25-45 tok/s selon carte |
 | `gpu-16gb.env` | 16 Go (4060 Ti 16 Go, 5060 Ti) | Bonsai 2 27B PQ2_0 + vision | Ternary-Bonsai-8B (1,75 Go) | 64 k (KV f16) | ~14,5 Gio | ~45 tok/s (mesure 5060 Ti sur ternaire v1) |
+| `a100-80gb.env` | **A100 80 Go (Colab Pro)** : usine de distillation / entrainement, banc d'evaluation | Bonsai 2 27B PQ2_0 + vision, 4 slots | Ternary-Bonsai-8B puis le clone entraine (Qwen3.5-2B complet) | 64 k (KV f16) | ~20 Gio + entrainement | 74 tok/s / 1 328 pp512 (livre blanc, A100 SXM ; PTQ1_0 plus lent sur Ampere : 55 / 703) |
 
 **Exigence minimale absolue** pour faire tourner *la fusion* : un CPU x86-64 (AVX2) ou ARM avec 8 Go de
 RAM, ~6 Go de disque : profil `minimal-cpu` (8B 1-bit + 1.7B ternaire). Pour un *27B* : 16 Go de RAM
 (CPU) ou 8 Go de VRAM (GPU). Pour *Bonsai 2 27B* : 8 Go de VRAM ou 16 Go de RAM unifiee (Mac M-series).
+
+**A100 80 Go disponible (Colab)** : elle ne remplace pas la 4060, elle la prepare. Voir
+[05 Colab A100](05-COLAB-A100.md) : distillation a ~0,4 s/etat, fine-tuning complet d'un Qwen3.5-2B en
+quelques heures, export GGUF Q8_0 (2,1 Go) ou Q4_K_M (1,3 Go) a deposer dans `models/` sur la 4060.
 
 ## 3. Feuille de calcul VRAM (a faire avant de choisir)
 

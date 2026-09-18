@@ -69,6 +69,7 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 
 | Composant | Role | Implementation | Taille | Port |
 |---|---|---|---|---|
+| (optionnel) A100 80 Go Colab | usine : distillation a grande echelle, fine-tuning complet du clone, export GGUF, banc d'evaluation | `colab/jev_bonsai_a100.ipynb`, profil `a100-80gb.env` | - | - |
 | Bonsai 2 27B `PTQ1_0` (+ `mmproj` Q8_0 optionnel) | System Two : raisonnement, generation, outils, vision, enseignant | `llama-server` fork PrismML `prism-b10683` | 5,93 Go (+0,63) | 8080 |
 | Ternary-Bonsai-1.7B `Q2_0_g64` (niveau 0) ou clone entraine Qwen3.5-0.8B/2B (niveau 1) | System One : decisions typees calibrees | second `llama-server`, 4 slots, `--reasoning-budget 0` | 0,37 Go / 0,9-2 Go | 8081 |
 | `jev_clone` (Python) | contrat `/v1/systemone`, lecture par grammaire, temperature, confiance, permutations, routeur de fusion, calibration, distillation, ledger | `jev serve` (FastAPI), `jev decide`, `jev bench` | - | 8008 |
@@ -228,6 +229,24 @@ Ordres de grandeur (a valider) : 0,8B, 100 k branches x ~350 tokens = 35 M token
 **Critere de sortie** : sur le jeu tenu a l'ecart, +10 points d'accuracy vs niveau 0 sur les questions
 maison, ECE <= 0,04, taux d'escalade en baisse d'au moins un tiers a precision egale.
 
+### Phases 6-7 bis - Variante "deux machines" : A100 80 Go (Colab) = usine, RTX 4060 = production
+
+Si une A100 80 Go est disponible (Colab Pro/Pro+), y deplacer les phases lourdes et ne rapatrier sur la
+4060 que des fichiers : `colab/jev_bonsai_a100.ipynb` enchaine tout, details dans [05 Colab A100](05-COLAB-A100.md).
+
+| Etape | Sur la 4060 (8 Go) | Sur l'A100 (80 Go) |
+|---|---|---|
+| Bonsai enseignant | PTQ1_0, 1 slot, prefill ~350 tok/s : ~1-1,5 s/etat | **PQ2_0**, 4 slots, prefill ~1 300 tok/s : **~0,4 s/etat** (20 000 etats en ~2-3 h) |
+| Modele du clone | Qwen3.5-0.8B LoRA ou 2B QLoRA | **Qwen3.5-2B (ou 4B) fine-tuning complet bf16** (`--full`, recette decider), batch 16-32, sequences 1 536-2 048 |
+| Duree d'entrainement | 0,8B : 2-3 h pour 35 M tokens | 2B : ~4-6 h pour 180 M tokens ; 0,8B : ~1,5 h |
+| Evaluation / calibration | sur le GGUF final | sur le GGUF final, servi par le meme fork llama.cpp, avant export |
+| Artefacts rapatries | - | `jev-clone-Q8_0.gguf` (2B : 2,1 Go ; 0,8B : 0,9 Go) ou `Q4_K_M`, `calibration.json`, dossier `merged/` pour re-entrainer |
+
+Regle de choix du clone final selon le profil 4060 : profil **qualite** (Bonsai 2 en VRAM) -> clone 0,8B
+Q8_0 (0,9 Go) ; profil **vitesse** (Bonsai-27B 1-bit) -> clone 2B Q8_0 (2,1 Go) ou 4B Q4_K_M (2,5 Go).
+Le notebook sert aussi de banc : les deux serveurs y tournent, `examples/ticket_routing.py` y mesure le
+taux d'escalade et les latences de la fusion complete avant la mise en production sur la 4060.
+
 ### Phase 8 - Boucle d'amelioration continue (mensuelle)
 
 1. `runs/ledger.jsonl` -> extraire les cas escalades et un echantillon des cas automatises.
@@ -265,6 +284,7 @@ maison, ECE <= 0,04, taux d'escalade en baisse d'au moins un tiers a precision e
 | 5 | fusion | escalade 10-40 % ; p50 S1 <= 200 ms ; p50 S2 <= 5 s | ledger |
 | 6 | distillation | >= 2 000 etats etiquetes ; accord soft/think >= 85 % sur cas surs | `distill.py` |
 | 7 | clone entraine | +10 pts accuracy ; ECE <= 0,04 ; escalade -33 % | `train_lora_rlcd.py` |
+| 6-7 bis | usine A100 | 20 000 etats distilles en < 4 h ; 2B entraine en < 8 h ; GGUF + calibration dans Drive | `colab/jev_bonsai_a100.ipynb` |
 | 8 | boucle | ECE par question <= 0,08 ; derive detectee sous 1 mois | ledger + `calibrate.py` |
 
 ## 5. Risques et parades

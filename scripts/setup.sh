@@ -12,10 +12,16 @@ RELEASE_TAG="${LLAMA_RELEASE_TAG:-prism-b10683-d8f26ee}"
 BASE_URL="https://github.com/PrismML-Eng/llama.cpp/releases/download/$RELEASE_TAG"
 
 info "1/4 environnement Python"
-if [ ! -d .venv ]; then python3 -m venv .venv; fi
-. .venv/bin/activate
-pip install -q --upgrade pip
-pip install -q -e ".[serve,dev]" huggingface_hub
+if [ "${SKIP_VENV:-0}" = 1 ]; then
+    PYTHON="${PYTHON:-python3}"   # Colab / conda : on utilise l'interpreteur courant
+    "$PYTHON" -m pip install -q -e ".[serve,dev]" huggingface_hub
+else
+    if [ ! -d .venv ]; then python3 -m venv .venv; fi
+    . .venv/bin/activate
+    PYTHON=python
+    pip install -q --upgrade pip
+    pip install -q -e ".[serve,dev]" huggingface_hub
+fi
 
 info "2/4 binaires llama.cpp (fork PrismML, requis pour Bonsai 2 ; compatibles Q1_0 / Q2_0_g64)"
 _arch="$(uname -m)"; _gpu=""; _cuda=""
@@ -50,7 +56,7 @@ fi
 
 dl() {  # $1 repo $2 dest $3 motifs (separes par des virgules)
     mkdir -p "$2"
-    python - "$1" "$2" "$3" <<'PY'
+    "$PYTHON" - "$1" "$2" "$3" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
 repo, dest, pats = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
