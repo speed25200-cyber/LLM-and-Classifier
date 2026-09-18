@@ -39,7 +39,7 @@ def build(per_task: int, seed: int):
         return [ds[i] for i in idx[:n]]
 
     try:  # banking77 : intentions bancaires (77 classes)
-        ds = load_dataset("banking77", split="train"); names = ds.features["label"].names
+        ds = load_dataset("PolyAI/banking77", split="train"); names = ds.features["label"].names
         for ex in take(ds, per_task):
             rows.append(choice_example(ex["text"], "What is the customer's intent?",
                                        [n.replace("_", " ") for n in names], names[ex["label"]].replace("_", " "), rng))
@@ -47,14 +47,14 @@ def build(per_task: int, seed: int):
         print("banking77 ignore:", e)
 
     try:  # ag_news : 4 themes
-        ds = load_dataset("ag_news", split="train"); names = ds.features["label"].names
+        ds = load_dataset("fancyzhx/ag_news", split="train"); names = ds.features["label"].names
         for ex in take(ds, per_task):
             rows.append(choice_example(ex["text"], "What is the topic of this news article?", names, names[ex["label"]], rng, abstain_p=0.1))
     except Exception as e:
         print("ag_news ignore:", e)
 
     try:  # go_emotions : noul par emotion
-        ds = load_dataset("go_emotions", "simplified", split="train"); names = ds.features["labels"].feature.names
+        ds = load_dataset("google-research-datasets/go_emotions", "simplified", split="train"); names = ds.features["labels"].feature.names
         for ex in take(ds, per_task):
             present = {names[i] for i in ex["labels"]}
             emo = rng.choice(names)
@@ -72,7 +72,7 @@ def build(per_task: int, seed: int):
         print("mmlu ignore:", e)
 
     try:  # yelp : notation 1-5 -> score a 5 niveaux
-        ds = load_dataset("yelp_review_full", split="train")
+        ds = load_dataset("Yelp/yelp_review_full", split="train")
         levels = ["1 star: terrible", "2 stars: poor", "3 stars: average", "4 stars: good", "5 stars: excellent"]
         for ex in take(ds, per_task // 2):
             rows.append({"state": ex["text"][:2000], "questions": {"q": {"type": "score", "instructions": "How would the reviewer rate this business?", "criteria": levels}},
