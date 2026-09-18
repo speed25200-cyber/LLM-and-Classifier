@@ -277,6 +277,17 @@ python examples/browser_agent.py --url https://example.com --goal "Open the 'Mor
 **Critere de sortie** : sur 20 taches navigateur simples (formulaire, recherche, navigation), >= 80 % de
 pas decides par le clone, taux de reussite >= celui de Bonsai seul, temps par tache divise par >= 3.
 
+### Phase 11 - Mesurer contre Jev et viser mieux
+
+[07 Battre Jev](07-BATTRE-JEV.md) et `eval/SCOREBOARD.md`. A chaque niveau du clone :
+```bash
+python -m eval.jev_benchmark --server http://127.0.0.1:8081 --name clone-l0 --repeat 5 && python -m eval.jev_benchmark --analyze
+python -m eval.mmlu_ece --server http://127.0.0.1:8081 --n 1200          # Colab
+```
+Puis garanties formelles sur vos donnees (ensembles conformes, porte a risque controle : `jev_clone/conformal.py`).
+**Critere de sortie** : colonnes du tableau de bord remplies ; sur jev-benchmark, accuracy >= 93,3 % et 0 erreur a
+confiance >= 0,9 sur 5 runs ; MMLU-1200 ECE <= 0,03 ; p50 < 100 ms.
+
 ### Phase 9 - Exploitation
 
 * **Ordre de demarrage** : Bonsai d'abord (gros allocataire), puis le clone, puis `jev serve`. Verifier
@@ -305,6 +316,7 @@ pas decides par le clone, taux de reussite >= celui de Bonsai seul, temps par ta
 | 7 | clone entraine | +10 pts accuracy ; ECE <= 0,04 ; escalade -33 % | `train_lora_rlcd.py` |
 | 6-7 bis | usine A100 | 20 000 etats distilles en < 4 h ; 2B entraine en < 8 h ; GGUF + calibration dans Drive | `colab/jev_bonsai_a100.ipynb` |
 | 10 | agent navigateur | >= 80 % de pas rapides ; reussite >= Bonsai seul ; temps / 3 | `examples/browser_agent.py`, `runs/trajectories.jsonl` |
+| 11 | tableau de bord vs Jev | jev-benchmark >= 93,3 %, 0 erreur a conf >= 0,9 ; MMLU ECE <= 0,03 ; p50 < 100 ms ; couverture conforme verifiee | `eval/`, `conformal.py` |
 | 8 | boucle | ECE par question <= 0,08 ; derive detectee sous 1 mois | ledger + `calibrate.py` |
 
 ## 5. Risques et parades

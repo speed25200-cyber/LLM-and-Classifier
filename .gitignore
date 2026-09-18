@@ -10,3 +10,4 @@ runs/
 data/
 *.gguf
 .pytest_cache/
+eval/results/
