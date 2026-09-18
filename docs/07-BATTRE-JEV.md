@@ -67,7 +67,7 @@ Ordres de grandeur A100 : distillation 50 k etats en ~6 h (Bonsai) + 10 k etats 
    `llama_memory_seq_cp` et les batches multi-sequences ; un binding ctypes de ~150 lignes remplace les N
    requetes HTTP par un `llama_decode` unique (etat en seq 0, copie vers 1..N, tokens des branches avec leur
    seq_id, logits lus aux derniers tokens). Gain attendu : x2-3 sur la latence System One en mode mono.
-2. **Etiquettes bi-lettres** (255 options) dans le prompt et la grammaire.
+2. ~~Etiquettes bi-lettres (255 options)~~ fait : lecture sur les noms d'options avec resolution des prefixes (`label_mode`).
 3. **Niveaux de score isoles** (chaque niveau juge seul, comme decider : +1 a +3 points, meilleure calibration).
 4. **Clone VL** dans `engine_torch.py` (images dans l'etat, M-RoPE) : reflex fournit la reference.
 5. **Benchmarks supplementaires** : banking77 / CLINC (routage), HelpSteer2 (score), un jeu de moderation, pour

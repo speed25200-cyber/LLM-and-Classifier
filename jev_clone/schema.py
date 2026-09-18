@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 Text = Union[str, dict, list, int, float, bool, None]
 
-MAX_CHOICE_OPTIONS = 26   # etiquettes A..Z (un token chacune) ; Jev accepte 255
+MAX_CHOICE_OPTIONS = 255  # <= 26 : etiquettes A..Z (un token) ; au-dela : lecture sur le nom de l'option (comme Jev, 255)
+MAX_LETTER_OPTIONS = 26
 MAX_SCORE_LEVELS = 10
 MIN_SCORE_LEVELS = 2
 
@@ -45,7 +46,9 @@ class ChoiceQuestion(BaseModel):
         if len(keys) < 2:
             raise ValueError("choice: au moins 2 options")
         if len(keys) > MAX_CHOICE_OPTIONS:
-            raise ValueError(f"choice: au plus {MAX_CHOICE_OPTIONS} options dans ce clone")
+            raise ValueError(f"choice: au plus {MAX_CHOICE_OPTIONS} options")
+        if any((not str(k).strip()) or '"' in str(k) or "\n" in str(k) for k in keys):
+            raise ValueError("choice: une option ne peut etre vide ni contenir de guillemet ou de saut de ligne")
         if len(set(keys)) != len(keys):
             raise ValueError("choice: options dupliquees")
         return v
@@ -76,6 +79,8 @@ class SystemOneRequest(BaseModel):
     state: Text
     questions: dict[str, Question]
     permutations: int = Field(default=1, ge=1, le=8)  # extension : moyenne sur N ordres d'options
+    # "auto" : lettres A..Z jusqu'a 26 options, sinon noms d'options ; "values" force la lecture sur les noms
+    label_mode: Literal["auto", "letters", "values"] = "auto"
 
     @model_validator(mode="after")
     def _nonempty(self):

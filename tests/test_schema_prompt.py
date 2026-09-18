@@ -13,9 +13,11 @@ def test_request_validation(ticket_request):
 def test_choice_limits():
     with pytest.raises(ValueError):
         SystemOneRequest.model_validate({"state": "x", "questions": {"q": {"type": "choice", "instructions": "?", "criteria": ["only"]}}})
+    SystemOneRequest.model_validate({"state": "x", "questions": {"q": {"type": "choice", "instructions": "?",
+                                                                        "criteria": [str(i) for i in range(27)]}}})  # 27 : mode valeurs
     with pytest.raises(ValueError):
         SystemOneRequest.model_validate({"state": "x", "questions": {"q": {"type": "choice", "instructions": "?",
-                                                                            "criteria": [str(i) for i in range(27)]}}})
+                                                                            "criteria": [str(i) for i in range(256)]}}})
     with pytest.raises(ValueError):
         SystemOneRequest.model_validate({"state": "x", "questions": {"q": {"type": "score", "instructions": "?", "criteria": ["one"]}}})
     with pytest.raises(ValueError):

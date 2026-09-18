@@ -23,7 +23,7 @@ class SystemOneEngine:
         rng = random.Random(seed)
         out: list[Branch] = []
         for qid, q in req.questions.items():
-            out.extend(build_branches(qid, q, self.fmt, req.permutations, rng))
+            out.extend(build_branches(qid, q, self.fmt, req.permutations, rng, label_mode=req.label_mode))
         return out
 
     def answer(self, req: SystemOneRequest | dict[str, Any]) -> SystemOneResponse:

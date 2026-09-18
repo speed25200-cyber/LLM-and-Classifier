@@ -110,6 +110,7 @@ l'etat ; un expert tranche en quelques secondes ; le logiciel consomme directeme
 | **qwen-rlcd** (shamazharikh) | Qwen3.5-0.8B-Base | "prefix-fork" : l'etat est prefill une fois, son cache (KV + etat conv/recurrent) est copie par branche | prototype inference | pourquoi un masque d'attention ne suffit pas sur les couches recurrentes (GatedDeltaNet) : il faut dupliquer l'etat |
 | **system-one-gemma** (akash-kamat) | Gemma 3 270M + tete de score LoRA (2,6 M params) | une sequence par option, score scalaire, softmax entre options | 64,4 % acc, **ECE 0,047**, 15 min sur un T4 | meme un modele minuscule se calibre bien : la calibration vaut plus que la taille |
 | **jevmlx / openjev**, **parallel-decisions** | n'importe quel modele MLX (Apple) | decodage contraint parallele par champ de schema | outil | l'idee de schema -> champs types -> une passe |
+| **Qwen-2.5-1B-RLCD** (harshatheg, 18 sept. 2026 ; "Parallel Constrained Decoding") | Qwen2.5-1.5B-Instruct 4-bit, MLX (+ moteur torch), **sans entrainement** | contexte + descriptions du schema prefill une fois, cache KV diffuse a tous les champs, logits restreints aux **premiers tokens des noms d'options** (jusqu'a 255), marche token par token pour departager les options a prefixe commun | M4 Max : 4 champs 75 ms, 28 champs 270 ms, 255 choix 89 ms ; 5,6-7x plus rapide que generer le JSON, 100 % de syntaxe valide (le JSON genere hallucinait 2 champs) | c'est notre niveau 0 tel quel ; nous en reprenons la **lecture sur les noms d'options** (255 options, guillemet fermant comme terminateur) ; "RLCD" y est un nom, pas un entrainement |
 | **jev-benchmark** (themsquared) | Jev reel | 60 cas de risque d'appel d'outil | 91,7 %, p50 ~420 ms, calibration exploitable | les cibles de calibration a viser |
 
 ## 5. Le clone de ce depot (`jev_clone/`)
@@ -122,7 +123,8 @@ l'etat ; un expert tranche en quelques secondes ; le logiciel consomme directeme
 * **Aucune dependance a un framework GPU** : tout GGUF servi par llama-server convient, y compris
   Bonsai 2 27B (mode "mono") ou un petit Ternary-Bonsai / Qwen3.5 (mode "dual"), sur CUDA, Vulkan,
   ROCm, Metal ou CPU.
-* **Differences avec Jev** : 26 options max par question (une lettre = un token ; Jev : 255) ; pas de
+* **Differences avec Jev** : jusqu'a 255 options (lettres A..Z jusqu'a 26, puis lecture sur le nom de l'option
+  avec resolution des prefixes partages, comme Qwen-2.5-1B-RLCD) ; pas de
   tete dediee ni de "parallel sampler" natif (les branches sont N requetes qui partagent un cache) ;
   la calibration doit etre **mesuree puis ajustee sur vos donnees** (`jev_clone/calibrate.py`) ; les
   garanties de Jev (ECE, robustesse) ne se transferent pas automatiquement.

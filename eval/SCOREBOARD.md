@@ -13,7 +13,7 @@ Seuls les chiffres **publics** de Jev sont opposables. Les colonnes "clone" se r
 | ... latence p50 / p95 | 421,6 / 542,0 ms (API) | idem | | | | < 100 / 150 ms (local, llama.cpp) ; < 50 ms (torch) |
 | MMLU 1 200 items : ECE apres temperature | 0,031 | annonce TypeSafe | | | | <= 0,030 |
 | MMLU 1 200 items : accuracy | non publie | (reflex 4B : 72 %) | | | | >= 72 % (4B) |
-| Options par question | 255 | docs TypeSafe | 26 | 26 | 26 (+ rank illimite) | rang de N candidats illimite (nouls paralleles) |
+| Options par question | 255 | docs TypeSafe | 255 (lettres <= 26, noms au-dela) | 255 | 255 (+ rank illimite) | rang de N candidats illimite (nouls paralleles) |
 | Etat maximal | 32 k tokens (64 k avec les questions) | docs TypeSafe | 8-32 k selon `-c` | idem | idem | 32 k |
 | Cout par decision | ~0,0004 $ (workflow) ; 0,042 $/M tokens | TypeSafe | 0 $ | 0 $ | 0 $ | 0 $ |
 | Garantie de couverture (prediction conforme) | aucune publiee | - | non | non | **oui** (`conformal.py`) | garantie 1-alpha, verifiee |

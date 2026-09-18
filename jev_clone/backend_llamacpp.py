@@ -15,6 +15,7 @@ Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp
 from __future__ import annotations
 
 import concurrent.futures as cf
+import json
 import time
 from dataclasses import dataclass
 
@@ -101,7 +102,68 @@ class LlamaCppBackend:
         return [t["id"] if isinstance(t, dict) else t for t in toks]
 
     # ---- lecture d'une branche --------------------------------------------------------------
+    def _top_probs(self, prompt: str, grammar: str, n_probs: int) -> tuple[list[dict], dict]:
+        """Une completion d'un token sous grammaire ; renvoie (top_probs renormalises, timings)."""
+        payload = self._with_lora({"prompt": prompt, "n_predict": 1, "n_probs": n_probs, "post_sampling_probs": True,
+                                   "samplers": [], "temperature": 1.0, "grammar": grammar, "cache_prompt": True,
+                                   "id_slot": self.id_slot})
+        r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
+        r.raise_for_status()
+        d = r.json()
+        cp = d.get("completion_probabilities") or []
+        if not cp:
+            raise RuntimeError("llama-server n'a pas renvoye completion_probabilities (n_probs ignore ?)")
+        return (cp[0].get("top_probs") or cp[0].get("top_logprobs") or []), (d.get("timings", {}) or {})
+
+    def _resolve_values(self, prompt: str, remainders: dict[str, str], terminator: str, mass: float,
+                        out: dict[str, float], depth: int, budget: list[int]) -> None:
+        """Repartit `mass` entre les options `remainders` (nom -> texte restant a produire) en lisant la
+        distribution du token suivant ; les tokens qui sont prefixe de plusieurs options declenchent une
+        lecture de continuation (prompt + token). Termine par `terminator` pour separer une option qui est
+        prefixe d'une autre ("MANUAL" / "MANUAL_REVIEW")."""
+        if len(remainders) == 1:
+            out[next(iter(remainders))] += mass
+            return
+        if depth > 8 or budget[0] <= 0:
+            for k in remainders:  # limite atteinte : on repartit uniformement
+                out[k] += mass / len(remainders)
+            return
+        budget[0] -= 1
+        grammar = "root ::= " + " | ".join(json.dumps(rem + terminator) for rem in remainders.values())
+        top, _ = self._top_probs(prompt, grammar, max(32, min(512, 4 * len(remainders))))
+        groups: dict[str, list[str]] = {}
+        pt: dict[str, float] = {}
+        for e in top:
+            tok = e.get("token", "")
+            if not tok:
+                continue
+            pr = float(e["prob"]) if "prob" in e else float(np.exp(e.get("logprob", -1e9)))
+            hit = [k for k, rem in remainders.items() if (rem + terminator).startswith(tok)]
+            if hit:
+                groups[tok] = hit; pt[tok] = pt.get(tok, 0.0) + pr
+        total = sum(pt.values())
+        if total <= 0:
+            for k in remainders:
+                out[k] += mass / len(remainders)
+            return
+        for tok, hit in groups.items():
+            share = mass * pt[tok] / total
+            if len(hit) == 1:
+                out[hit[0]] += share
+            else:
+                sub = {k: remainders[k][len(tok):] for k in hit}
+                self._resolve_values(prompt + tok, sub, terminator, share, out, depth + 1, budget)
+
     def score_branch(self, prefix: str, branch: Branch) -> BranchResult:
+        if branch.terminator:
+            t0 = time.perf_counter()
+            out = {k: 0.0 for k in branch.labels}
+            budget = [64]  # nombre maximal de lectures de continuation par branche
+            self._resolve_values(prefix + branch.text, {k: k for k in branch.labels}, branch.terminator, 1.0, out, 0, budget)
+            probs = np.array([out[k] for k in branch.labels], dtype=np.float64)
+            probs = probs / probs.sum() if probs.sum() > 0 else np.full(len(branch.labels), 1.0 / len(branch.labels))
+            return BranchResult(logits=probs_to_logits(probs), prompt_tokens=0, cached_tokens=0,
+                                ms=(time.perf_counter() - t0) * 1000.0)
         payload = {
             "prompt": prefix + branch.text,
             "n_predict": 1,

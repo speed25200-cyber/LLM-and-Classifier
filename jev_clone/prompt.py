@@ -29,7 +29,7 @@ import string
 from dataclasses import dataclass, field
 from typing import Any
 
-from jev_clone.schema import ChoiceQuestion, NoulQuestion, ScoreQuestion, Text
+from jev_clone.schema import MAX_LETTER_OPTIONS, ChoiceQuestion, NoulQuestion, ScoreQuestion, Text
 
 SYSTEM_PROMPT = (
     "You are a System One decision model. You read the State and answer each Question "
@@ -56,6 +56,7 @@ class Branch:
     text: str                 # texte de la branche (apres le prefixe)
     labels: list[str]         # etiquettes dont on lit la probabilite, dans l'ordre du prompt
     keys: list[Any] = field(default_factory=list)  # keys[i] = option / niveau / booleen designe par labels[i]
+    terminator: str = ""      # "" : etiquettes mono-token (lettres, Yes/No) ; '"' : noms d'options entre guillemets
 
 
 @dataclass
@@ -70,13 +71,14 @@ class PromptFormat:
             return f"{self.system_prompt}\n\n{body}"
         return f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n<|im_start|>user\n{body}"
 
-    def branch(self, body: str) -> str:
+    def branch(self, body: str, opening: str = "") -> str:
+        """`opening` est ajoute apres l'amorce assistant (ex. un guillemet ouvrant en mode valeurs)."""
         if not self.chat:
-            return f"{body}Answer:"
+            return f"{body}Answer:{opening}"
         tail = "<|im_end|>\n<|im_start|>assistant\n"
         if self.no_think:
             tail += "<think>\n\n</think>\n\n"
-        return f"{body}{tail}"
+        return f"{body}{tail}{opening}"
 
 
 def _options_block(instructions: Text, labelled: list[tuple[str, str]], ask: str) -> str:
@@ -87,8 +89,21 @@ def _options_block(instructions: Text, labelled: list[tuple[str, str]], ask: str
     return "\n".join(lines)
 
 
+def _value_branch(qid: str, q: ChoiceQuestion, fmt: PromptFormat, order: list[str]) -> Branch:
+    """Mode valeurs (> 26 options, ou label_mode="values") : on lit la probabilite du NOM de chaque option,
+    ecrit entre guillemets ; la grammaire n'autorise que `nom"`, et les options qui partagent un prefixe sont
+    departagees par des lectures de continuation (backend). Meme principe que Jev (255 options)."""
+    opts = q.options()
+    lines = [f"# Question\n{render_text(q.instructions)}\n", "# Options (answer with the exact option name, in quotes)"]
+    for k in order:
+        d = render_text(opts[k])
+        lines.append(f'- "{k}"' + (f": {d}" if d else ""))
+    lines.append("\nRespond with only the option name, in quotes.\n")
+    return Branch(qid, "choice", fmt.branch("\n".join(lines), opening='"'), list(order), list(order), terminator='"')
+
+
 def build_branches(qid: str, q, fmt: PromptFormat, permutations: int = 1,
-                   rng: random.Random | None = None) -> list[Branch]:
+                   rng: random.Random | None = None, label_mode: str = "auto") -> list[Branch]:
     """1..permutations branches pour une question (noul n'est jamais permute)."""
     rng = rng or random.Random(0)
 
@@ -115,18 +130,22 @@ def build_branches(qid: str, q, fmt: PromptFormat, permutations: int = 1,
         def desc_of(k):
             return f"(level {k} of {len(keys) - 1}) {render_text(q.criteria[k])}"
 
+    values = isinstance(q, ChoiceQuestion) and (label_mode == "values" or (label_mode == "auto" and len(keys) > MAX_LETTER_OPTIONS))
     out: list[Branch] = []
     for p in range(permutations):
         order = list(keys)
         if p > 0:
             rng.shuffle(order)
+        if values:
+            out.append(_value_branch(qid, q, fmt, order))
+            continue
         labels = [LETTERS[i] for i in range(len(order))]
         labelled = [(lab, desc_of(k)) for lab, k in zip(labels, order)]
         out.append(Branch(qid, kind, fmt.branch(_options_block(q.instructions, labelled, ask)), labels, order))
     return out
 
 
-def label_grammar(labels: list[str]) -> str:
-    """Grammaire GBNF qui n'autorise que les etiquettes : le sampler de llama.cpp masque tout le reste
-    et `post_sampling_probs` renvoie la distribution renormalisee sur ces seuls tokens."""
-    return "root ::= " + " | ".join(json.dumps(l) for l in labels)
+def label_grammar(labels: list[str], terminator: str = "") -> str:
+    """Grammaire GBNF qui n'autorise que les etiquettes (suivies du terminateur eventuel) : le sampler de
+    llama.cpp masque tout le reste et `post_sampling_probs` renvoie la distribution renormalisee."""
+    return "root ::= " + " | ".join(json.dumps(l + terminator) for l in labels)
