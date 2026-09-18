@@ -61,6 +61,8 @@ class GuidedGenerator:
             reasoning += out["content"]; think_tokens += out["tokens"]
             if out["stop_type"] == "word" or out["stop_type"] == "eos":
                 stopped_by = "model"; break
+            if think_tokens >= self.max_think:
+                break  # budget epuise : inutile de consulter S1
             st = {"task": task, "reasoning_so_far": reasoning[-6000:]}
             r = self.s1.answer({"state": st, "questions": {"determined": {"type": "noul", "instructions": DETERMINED_Q},
                                                             "stuck": {"type": "noul", "instructions": STUCK_Q}}})
