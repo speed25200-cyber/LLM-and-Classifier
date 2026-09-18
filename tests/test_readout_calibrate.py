@@ -87,3 +87,10 @@ def test_aggregate_label_probs():
     assert p[1] == 1.0
     p = aggregate_label_probs([], ["A", "B"])
     assert abs(p[0] - 0.5) < 1e-9
+
+
+def test_backend_lora_payload():
+    from jev_clone.backend_llamacpp import LlamaCppBackend
+    be = LlamaCppBackend("http://x", lora=[{"id": 0, "scale": 0.0}])
+    assert be._with_lora({"a": 1}) == {"a": 1, "lora": [{"id": 0, "scale": 0.0}]}
+    assert LlamaCppBackend("http://x")._with_lora({"a": 1}) == {"a": 1}

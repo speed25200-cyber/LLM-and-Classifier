@@ -4,8 +4,22 @@
 set -e
 . "$(dirname "$0")/common.sh"
 BIN="$(find_server)" || { err "llama-server introuvable : ./scripts/setup.sh"; exit 1; }
-MODEL="$(find_gguf "$BONSAI_FAMILY" "$BONSAI_SIZE" "${BONSAI_BAND:-}")" || { err "poids Bonsai introuvables : ./scripts/setup.sh"; exit 1; }
+if [ -n "${BONSAI_GGUF:-}" ]; then
+    MODEL="$BONSAI_GGUF"; case "$MODEL" in /*) ;; *) MODEL="$ROOT/$MODEL" ;; esac   # GGUF quelconque (chemin explicite)
+    [ -f "$MODEL" ] || { err "BONSAI_GGUF=$BONSAI_GGUF introuvable"; exit 1; }
+else
+    MODEL="$(find_gguf "$BONSAI_FAMILY" "$BONSAI_SIZE" "${BONSAI_BAND:-}")" || { err "poids Bonsai introuvables : ./scripts/setup.sh"; exit 1; }
+fi
 export LD_LIBRARY_PATH="$(dirname "$BIN")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Adaptateur LoRA optionnel (ex. OrcaBonsai : ablation de refus, rang 1, 9,7 Mo) applique dans le graphe par
+# llama.cpp, poids de base inchanges. Echelle reglable ici et par requete ("lora": [{"id": 0, "scale": s}]).
+lora=""
+if [ -n "${BONSAI_LORA:-}" ]; then
+    LORA="$BONSAI_LORA"; case "$LORA" in /*) ;; *) LORA="$ROOT/$LORA" ;; esac
+    [ -f "$LORA" ] || { err "BONSAI_LORA=$BONSAI_LORA introuvable (./scripts/fetch_orcabonsai.sh)"; exit 1; }
+    lora="--lora-scaled $LORA:${BONSAI_LORA_SCALE:-1.0}"
+fi
 
 mm=""
 case "${BONSAI_MMPROJ:-off}" in
@@ -20,6 +34,7 @@ echo "=== Bonsai (System Two) ==="
 echo "  modele  : $MODEL"
 echo "  binaire : $BIN"
 echo "  ctx=$BONSAI_CTX ngl=$BONSAI_NGL slots=$BONSAI_NP kv4=${BONSAI_KV4:-0} mmproj=${BONSAI_MMPROJ:-off} budget=${BONSAI_REASONING_BUDGET:--1}"
+[ -n "$lora" ] && echo "  LoRA    : $LORA (echelle ${BONSAI_LORA_SCALE:-1.0})"
 echo "  API     : http://127.0.0.1:${BONSAI_PORT:-8080}/v1/chat/completions"
 # --cache-ram : cache de prompts en RAM (reutilisation du prefixe entre slots) ; --ctx-checkpoints : points de
 # reprise de l'etat recurrent (modeles hybrides GDN) pour reutiliser un prefixe partiel.
@@ -28,4 +43,5 @@ exec "$BIN" -m "$MODEL" --host 127.0.0.1 --port "${BONSAI_PORT:-8080}" \
     $SAMPLING --jinja $mm $kv \
     --reasoning-budget "${BONSAI_REASONING_BUDGET:--1}" \
     --cache-ram "${BONSAI_CACHE_RAM:-2048}" --ctx-checkpoints 8 \
+    $lora \
     "$@"

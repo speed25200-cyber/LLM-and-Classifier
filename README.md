@@ -42,17 +42,18 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 | `docs/03-MATERIEL-profils.md` | RTX 4060 et exigences minimales, matrice de profils, feuille VRAM, depannage OOM |
 | `docs/04-REFERENCES.md` | sources |
 | `jev_clone/` | le clone : `schema` (contrat), `prompt` (prefixe + branches), `backend_llamacpp` (lecture par grammaire), `readout` (temperature, confiance), `engine`, `calibrate`, `distill`, `fusion` (routeur), `tools` (le clone comme outils de Bonsai + boucle d'agent), `computer_use` (agent navigateur a deux vitesses), `server`, `cli` |
-| `scripts/` | `setup.sh`, `start_bonsai.sh`, `start_jev_clone.sh`, `bench.sh`, `profiles/*.env`, `windows/*.ps1` |
+| `scripts/` | `setup.sh`, `start_bonsai.sh` (`BONSAI_GGUF`, `BONSAI_LORA`), `start_jev_clone.sh`, `bench.sh`, `fetch_orcabonsai.sh`, `profiles/*.env`, `windows/*.ps1` |
 | `training/` | `train_lora_rlcd.py` (LoRA / QLoRA / `--full` + regle de score propre + distillation), `make_public_mix.py` (jeux publics -> JSONL) et sa notice |
 | `colab/` | notebook A100 80 Go : installation, Bonsai enseignant, distillation, entrainement complet, export GGUF, calibration, copie vers Drive |
 | `docs/05-COLAB-A100.md` | usine A100 / production 4060 : quoi faire ou, durees, artefacts |
 | `examples/` | routage de tickets avec escalade ; boucle d'agent temps reel ; agent navigateur (`browser_agent.py`) |
 | `docs/06-AGENT-COMPUTER-USE.md` | fusion bidirectionnelle, computer use, budget de latence, ecart honnete avec Jev |
+| `docs/08-ORCABONSAI-UNCENSORED.md` | variante Bonsai 2 sans refus (adaptateur LoRA de rang 1 a l'execution) : fonctionnement, mesures des auteurs et reserves, integration, ou passe le garde-fou |
 | `docs/07-BATTRE-JEV.md`, `eval/SCOREBOARD.md` | cibles chiffrees contre les chiffres publics de Jev, sept axes d'avance (dont cinq inedits), plan A100 en 4 semaines |
 | `eval/` | banc de mesure : les 60 cas et les sorties reelles de Jev (jev-benchmark) mesures avec le meme code que le clone ; MMLU-1200 |
 | `jev_clone/conformal.py` | ensembles de prediction conformes (couverture garantie) et porte a risque controle |
 | `jev_clone/engine_torch.py` | moteur en passe unique (toutes les questions en un forward), cible < 50 ms |
-| `tests/` | 36 tests (hors ligne, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
+| `tests/` | 37 tests (hors ligne, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
 
 ## Ce qui est verifie / ce qui ne l'est pas
 * Verifie ici : le paquet `jev_clone` (tests unitaires), l'agent navigateur sur une page locale (Playwright), la lecture par grammaire et le cache de prefixe

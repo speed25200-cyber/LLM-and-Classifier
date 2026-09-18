@@ -46,6 +46,10 @@ chiffres directement a la source avant de les citer.
 * john-rocky, *coreai-model-zoo* issue #28 (portage Bonsai 2, noyaux Hadamard + GEMM ternaire) - https://github.com/john-rocky/coreai-model-zoo/issues/28
 * MarkTechPost, *PrismML Releases Bonsai 27B* - https://www.marktechpost.com/2026/07/14/... *(resume)* ; Kaitchup, *Bonsai 27B Review* *(resume)* ; Kubesimplify, *Bonsai 27B benchmark: RTX PRO 6000 vs DGX Spark* *(resume)* ; DataCamp, *How to Run Bonsai 27B Locally on 8GB Memory* *(resume)*
 
+## OrcaBonsai (ablation de refus)
+* Continuum-AI-Corp / OrcaRouter research team, *OrcaBonsai-27B-Uncensored* (clone, lu : README, `scripts/export_gguf_lora.py`, adaptateur GGUF inspecte, empreintes) - https://github.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored
+* Arditi et al., *Refusal in Language Models Is Mediated by a Single Direction* (2024) - https://arxiv.org/abs/2406.11717 (la technique d'ablation de direction)
+
 ## Qwen
 * QwenLM, *Qwen3.8* (lu) - https://github.com/QwenLM/Qwen3.8 ; Qwen/Qwen3.8-27B (14 aout 2026), Qwen/Qwen3.8-2.4T-A95B (12 aout 2026)
 * Qwen3.5 (0.8B / 2B / 4B / 9B, 2 mars 2026) : bases des clones ouverts ; MindStudio, *Qwen3.8-27B Explained: Hybrid Attention, 262K Context* *(resume)*

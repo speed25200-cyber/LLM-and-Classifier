@@ -56,12 +56,21 @@ def aggregate_label_probs(top: list[dict], labels: list[str]) -> np.ndarray:
 
 class LlamaCppBackend:
     def __init__(self, base_url: str = "http://127.0.0.1:8081", timeout: float = 120.0,
-                 max_workers: int = 4, id_slot: int = -1):
+                 max_workers: int = 4, id_slot: int = -1, lora: list[dict] | None = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_workers = max_workers
         self.id_slot = id_slot
+        # echelle des adaptateurs LoRA charges par le serveur, par requete : [{"id": 0, "scale": 1.0}]
+        # (None = reglage du serveur). Permet, en mode mono, de lire les probabilites System One sur le modele
+        # publie (scale 0) tout en generant avec l'adaptateur (scale 1) sur le meme serveur.
+        self.lora = lora
         self._session = requests.Session()
+
+    def _with_lora(self, payload: dict) -> dict:
+        if self.lora is not None:
+            payload = {**payload, "lora": self.lora}
+        return payload
 
     # ---- infos serveur -------------------------------------------------------------------
     def props(self) -> dict:
@@ -104,6 +113,7 @@ class LlamaCppBackend:
             "cache_prompt": True,
             "id_slot": self.id_slot,
         }
+        payload = self._with_lora(payload)
         t0 = time.perf_counter()
         r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
         r.raise_for_status()
@@ -147,6 +157,7 @@ class LlamaCppBackend:
                 payload["chat_template_kwargs"] = {"enable_thinking": False}
         if extra:
             payload.update(extra)
+        payload = self._with_lora(payload)
         r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
         r.raise_for_status()
         return r.json()

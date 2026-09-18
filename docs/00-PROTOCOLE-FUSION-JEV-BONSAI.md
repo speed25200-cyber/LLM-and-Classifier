@@ -76,6 +76,7 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 | `scripts/profiles/*.env` | choix des modeles, contexte, offload, KV4, budgets | `setup.sh`, `start_bonsai.sh`, `start_jev_clone.sh`, `bench.sh` | - | - |
 | `training/` | RLCD-lite : LoRA/QLoRA + regle de score propre + KL enseignant, export GGUF | `train_lora_rlcd.py` | - | - |
 | `jev_clone/tools.py`, `computer_use.py` | Bonsai consulte le clone (outils `judge_*`), boucle d'agent, agent navigateur a deux vitesses | `AgentLoop`, `ComputerUseAgent`, `examples/browser_agent.py` | - | - |
+| (optionnel) adaptateur OrcaBonsai | ablation de refus a l'execution sur Bonsai 2 (poids inchanges), echelle reglable par requete | `scripts/fetch_orcabonsai.sh`, profil `rtx4060-8gb-orcabonsai.env`, `BONSAI_LORA` | 9,7 Mo | - |
 
 ## 3. Phases
 
@@ -123,6 +124,13 @@ et `--ctx-checkpoints 8` (reutilisation de prefixe, y compris sur les couches re
 
 **Critere de sortie** : `predicted_per_second` >= 25 tok/s sur RTX 4060 (estimation ; noter la valeur
 reelle dans `runs/bench.md`) ; VRAM occupee <= 7,0 Gio (`nvidia-smi`).
+
+**Option : variante sans refus (OrcaBonsai).** Memes poids Bonsai 2 + un adaptateur LoRA de rang 1 (9,7 Mo)
+qui retire la direction de refus dans le graphe : `./scripts/fetch_orcabonsai.sh` puis le profil
+`rtx4060-8gb-orcabonsai.env`. Elle supprime le sur-refus (25 % -> 0 % sur JBB-benign) qui bloque un agent ;
+en contrepartie le garde-fou passe entierement dans System One, la porte a risque et l'executeur (voir
+[08 OrcaBonsai](08-ORCABONSAI-UNCENSORED.md)). Mesurer avant d'adopter : refus sur vos invites benignes a
+echelle 0 et 1, jev-benchmark en mode mono aux deux echelles.
 
 ### Phase 3 - Clone de Jev, niveau 0 : sans entrainement (15 min)
 

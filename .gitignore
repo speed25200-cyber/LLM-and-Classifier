@@ -11,3 +11,4 @@ data/
 *.gguf
 .pytest_cache/
 eval/results/
+third_party/
