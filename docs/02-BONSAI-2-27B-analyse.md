@@ -14,6 +14,13 @@
 | **17 sept. 2026** | **Ternary Bonsai 2 27B** | **Qwen3.8-27B** (sorti le 14 aout 2026) | ternaire g128 rotation Hadamard | **5,93 Go (PTQ1_0)** / 7,25 Go (PQ2_0) | **98,2 % du FP16** (83,9 vs 85,4 sur 20 benchmarks), depasse Qwen3.6-27B FP16 (83,6) |
 
 Licence Apache 2.0 pour tous ; poids publics sur Hugging Face (`prism-ml/*`), sans token.
+Collection officielle Bonsai 2 : **https://huggingface.co/collections/prism-ml/bonsai-2** (annonce PrismML
+du 17 septembre 2026, 23:03 : "Based on Qwen3.8 27B, Bonsai 2 27B is 9x smaller than its full-precision
+counterpart while retaining 98.2% of its aggregate benchmark performance. [...] The footprint remains 5.9 GB").
+Depots connus de la collection (d'apres les scripts officiels `Bonsai-demo`) : `Ternary-Bonsai-2-27B-gguf`
+(PTQ1_0, PQ2_0, mmproj Q8_0 / BF16), `Ternary-Bonsai-2-27B-mlx-2bit`, et a part `Ternary-Bonsai-2-27B-gguf-dev`
+(bande Q2_0 de test, fork obligatoire). **Bonsai 2 n'existe qu'en 27B** pour l'instant : les scripts
+officiels refusent les autres tailles pour cette famille.
 
 ## 2. Bonsai 2 27B : specification
 
@@ -41,9 +48,18 @@ Moyenne des 20 benchmarks (mode reflexion, effort xhigh, EvalScope + vLLM sur H1
 | Qwen3.8-27B IQ2_XXS (quantif. classique) | 2,2 | 7,3 Go | 75,2 | 88,4 % |
 | **Ternary Bonsai 2 27B** | **1,76** | **5,93 Go** | **83,9** | **98,2 %** |
 
-Par categorie (Qwen3.8 / Bonsai 2 / Qwen3.6) : agentique-outils 79,7 / **77,6** / 80,1 ; code 82,2 / **81,6** / 82,6 ;
-maths 97,1 / **96,6** / 94,6 ; connaissances-raisonnement 86,7 / **84,0** / 84,7 ; suivi d'instructions 81,3 / **82,7** / 74,5 ;
-vision 81,6 / **78,6** / 79,8. Points saillants : AIME26 95,8, LiveCodeBench 90,1 (IQ2_XXS : 78,6 et 70,1) ;
+Par categorie (table de l'annonce PrismML, identique au livre blanc) :
+
+| Capacite | Qwen3.6 27B | Qwen3.8 27B | **Ternary Bonsai 2 27B** | Retention vs Qwen3.8 |
+|---|---|---|---|---|
+| Connaissances & raisonnement | 84,71 | 86,66 | **83,95** | 96,9 % |
+| Maths | 94,64 | 97,06 | **96,57** | 99,5 % |
+| Code | 82,57 | 82,17 | **81,58** | 99,3 % |
+| Agentique & appels d'outils | 80,05 | 79,74 | **77,57** | 97,3 % |
+| Suivi d'instructions | 74,53 | 81,25 | **82,66** | 102 % |
+| Vision | 79,82 | 81,64 | **78,59** | 96,3 % |
+| **Global (20 benchmarks)** | 83,6 | 85,4 | **83,9** | **98,2 %** |
+ Points saillants : AIME26 95,8, LiveCodeBench 90,1 (IQ2_XXS : 78,6 et 70,1) ;
 τ²-Bench 80,2, BFCL v3 74,9 ; **Terminal-Bench 2.1 52,8 (Qwen3.8 : 69,7) et SWE-bench Verified 60,8 (80,6)** :
 l'agentique long-horizon retient ~75 %, c'est la faiblesse relative a connaitre. Le livre blanc note
 aussi que la generation precedente perdait 17,5 % en appels d'outils ; Bonsai 2 corrige l'essentiel.

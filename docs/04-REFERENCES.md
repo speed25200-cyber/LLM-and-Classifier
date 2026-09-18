@@ -34,6 +34,8 @@ chiffres directement a la source avant de les citer.
 ## Bonsai / PrismML
 * PrismML, *Ternary Bonsai 2 27B* (livre blanc PDF, sept. 2026, lu integralement) - `Bonsai-demo/bonsai-2-27b-whitepaper.pdf`
 * PrismML, *Bonsai 27B* (livre blanc PDF, juil. 2026, lu) - `Bonsai-demo/bonsai-27b-whitepaper.pdf`
+* PrismML, collection Hugging Face **Bonsai 2** - https://huggingface.co/collections/prism-ml/bonsai-2 (lien fourni par l'utilisateur ; domaine non accessible depuis l'environnement de redaction)
+* PrismML sur X, annonce de Ternary Bonsai 2 27B, 17 sept. 2026 23:03, table de retention par capacite (capture fournie par l'utilisateur) - https://x.com/PrismML/status/2100692248480596348
 * PrismML, *Introducing Bonsai 2 27B* - https://prismml.com/news/bonsai-2-27b *(resume)* ; PR Newswire, *PrismML Launches Bonsai 2 27B, Its Most Capable Model Yet* (17 sept. 2026) *(resume)*
 * PrismML, *PrismML Announces 1-bit Bonsai 27B* (14 juil. 2026) - https://prismml.com/news/prismml-releases-bonsai-27b *(resume)* ; *Introducing Ternary Bonsai* (16 avr. 2026) - https://prismml.com/news/ternary-bonsai *(resume)*
 * PrismML-Eng, *Bonsai-demo* (clone, lu : README, MODEL-FORMATS.md, KV-CACHE.md, SPECULATIVE.md, AGENTS.md, VISION.md, TOOLS.md, environment_variables.md, community-benchmarks/) - https://github.com/PrismML-Eng/Bonsai-demo
