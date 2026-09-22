@@ -116,7 +116,7 @@ class Workspace:
         for q in sorted(p.rglob("*")):
             if any(part.startswith(".") or part in SKIP_DIRS for part in q.relative_to(self.root).parts):
                 continue
-            out.append(str(q.relative_to(self.root)) + ("/" if q.is_dir() else ""))
+            out.append(q.relative_to(self.root).as_posix() + ("/" if q.is_dir() else ""))   # "/" partout (Windows compris)
             if len(out) >= max_entries:
                 break
         return {"ok": True, "entries": out}
