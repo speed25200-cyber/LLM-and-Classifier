@@ -135,6 +135,10 @@ class AppState {
       case "runtime.degraded":
         this.toast("warn", "Configuration ajustee automatiquement", e.note);
         return;
+      case "runtime.calibrated":
+        this.toast("info", "VRAM calibree sur votre carte", `${e.model} : ${(e.used_mib / 1024).toFixed(2)} Gio mesures ; le prochain plan en tiendra compte.`);
+        this.refreshSoon();
+        return;
       case "download.progress": {
         const j: DownloadJob = e.job;
         const prev = this.downloads[j.id];

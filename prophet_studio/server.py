@@ -59,6 +59,9 @@ class Studio:
                                   desktop_backend=self._demo_desktop if demo else None)
         self.voice = VoiceService(self.installer.voice_files, self.settings.get, threads=max(1, min(4, self.hw.cpu_cores // 2)))
         self.monitor = hwmod.GpuMonitor()
+        self.runtime.vram_probe = lambda: (self.monitor.sample() or {}).get("vram_used_mib")
+        self.runtime.on_measure = self._record_vram
+        self._load_vram_calibration()
         self.last_bench: dict | None = None
         self.started = time.time()
         if demo:
@@ -81,6 +84,33 @@ class Studio:
             self.installer.registry["models"][mid] = {"main": str(f), "role": MODELS[mid].role, "installed_at": time.time(), "demo": True}
         self.installer.registry["runtime"] = {"tag": "demo", "backend": "demo", "server": sys.executable, "cuda": None, "version": "faux llama-server"}
         self.installer._save()
+
+    # ---- calibration VRAM : mesures reelles -> planificateur -------------------------------------------------------
+    def _load_vram_calibration(self) -> None:
+        from prophet_studio import planner
+        f = self.paths.runs / "vram_calibration.json"
+        if f.exists():
+            try:
+                planner.MEASURED.update({k: float(v["overhead_mib"]) for k, v in json.loads(f.read_text(encoding="utf-8")).items()})
+            except Exception:
+                pass
+
+    def _record_vram(self, role: str, sp, used_mib: float) -> None:
+        from prophet_studio import planner
+        from prophet_studio.catalog import MODELS
+        m = MODELS.get(sp.model_id)
+        if m is None:
+            return
+        ctx = sp.ctx
+        mm = m.mmproj_gib * 1024 if role == "s2" and sp.mmproj == "gpu" else 0.0
+        over = planner.calibrated_overhead(m.id, m.kv_kib_f16, m.weights_gib, ctx, sp.kv_type, mm, used_mib)
+        planner.MEASURED[m.id] = over
+        f = self.paths.runs / "vram_calibration.json"
+        data = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        data[m.id] = {"overhead_mib": round(over, 1), "used_mib": round(used_mib, 1), "ctx": ctx, "kv_type": sp.kv_type,
+                      "gpu": self.hw.gpu.name if self.hw.gpu else "", "ts": time.time()}
+        f.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.bus.publish({"type": "runtime.calibrated", "model": m.id, "used_mib": round(used_mib), "overhead_mib": round(over)})
 
     def server_cmd(self) -> list[str] | None:
         if self.demo:

@@ -229,3 +229,41 @@ def test_speech_text_cleanup_and_wav():
 def test_catalog_has_recommended_models():
     assert MODELS["bonsai2-27b-ptq1"].size_gb == 5.93 and MODELS["bonsai2-27b-ptq1"].runtime == "prism"
     assert MODELS["ternary-1.7b"].role == "s1"
+
+
+# ---- calibration VRAM ----------------------------------------------------------------------------------------------------
+def test_measured_overhead_feeds_the_planner():
+    from prophet_studio import planner
+    before = make_plan(hw(used=150, display=False), "contexte")
+    try:
+        # mesure : le serveur a pris 6 250 Mio a 32 k (q4_0) -> surcout reel ~ 6250 - 5652 - 573 = ~25 -> borne a 200 Mio
+        over = planner.calibrated_overhead("bonsai2-27b-ptq1", 64, 5.52, 32768, "q4_0", 0.0, 6250.0)
+        assert over == 200.0
+        planner.MEASURED["bonsai2-27b-ptq1"] = 600.0
+        after = make_plan(hw(used=150, display=False), "contexte")
+        assert after.s2.ctx > before.s2.ctx and any("calibre" in n for n in after.notes)
+        assert after.budget["s2_runtime"] == 664
+    finally:
+        planner.MEASURED.clear()
+
+
+def test_supervisor_reports_vram_delta(tmp_path):
+    import sys
+    from prophet_studio.supervisor import Runtime
+    model = tmp_path / "m.gguf"; model.touch()
+    seen, vram = [], iter([1000.0, 7300.0, 7300.0, 7300.0])
+    rt = Runtime(tmp_path / "logs", lambda e: None, lambda mid: model, lambda mid: None,
+                 lambda: [sys.executable, "-m", "prophet_studio.demo.fake_llama"], lambda: set())
+    rt.vram_probe = lambda: next(vram)
+    rt.on_measure = lambda role, sp, used: seen.append((role, sp.model_id, used))
+    import socket
+    ports = []
+    for _ in range(2):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0)); ports.append(s.getsockname()[1])
+    plan = make_plan(hw())
+    try:
+        assert rt.start(plan, tuple(ports))
+        assert seen == [("s2", "bonsai2-27b-ptq1", 6300.0)]   # classifieur sur CPU : pas de mesure GPU
+    finally:
+        rt.stop()

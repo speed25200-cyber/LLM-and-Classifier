@@ -58,13 +58,29 @@ def _gib(x: float) -> float:
     return x * 1024.0
 
 
+MEASURED: dict[str, float] = {}   # surcout runtime mesure sur cette machine (Mio), par modele : voir calibrated_overhead()
+
+
+def calibrated_overhead(model_id: str, kv_kib: float, weights_gib: float, ctx: int, kv_type: str, mmproj_mib: float, used_mib: float) -> float:
+    """Surcout runtime deduit d'une mesure : VRAM prise par le serveur - poids - KV - vision, borne a [200, 3000] Mio."""
+    from prophet_studio.catalog import KV_FACTOR
+    kv = kv_kib * KV_FACTOR.get(kv_type, 1.0) * ctx / 1024.0
+    return max(200.0, min(3000.0, used_mib - weights_gib * 1024.0 - kv - mmproj_mib))
+
+
+def _overhead_mib(m: ModelSpec) -> float:
+    if m.id in MEASURED:
+        return MEASURED[m.id] + 64.0   # petite marge au-dessus de la mesure
+    return _gib(m.overhead_gib)
+
+
 def s2_mib(m: ModelSpec, ctx: int, kv: str, mmproj_gpu: bool) -> dict:
-    return {"s2_weights": _gib(m.weights_gib), "s2_runtime": _gib(m.overhead_gib), "s2_kv": kv_mib(m, ctx, kv),
+    return {"s2_weights": _gib(m.weights_gib), "s2_runtime": _overhead_mib(m), "s2_kv": kv_mib(m, ctx, kv),
             "mmproj": _gib(m.mmproj_gib) if mmproj_gpu else 0.0}
 
 
 def s1_mib(m: ModelSpec) -> dict:
-    return {"s1_weights": _gib(m.weights_gib), "s1_runtime": _gib(m.overhead_gib), "s1_kv": kv_mib(m, S1_CTX, S1_KV)}
+    return {"s1_weights": _gib(m.weights_gib), "s1_runtime": _overhead_mib(m), "s1_kv": kv_mib(m, S1_CTX, S1_KV)}
 
 
 def expected_speed(g: GPU | None, m: ModelSpec, device: str) -> dict:
@@ -197,6 +213,8 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         notes.append("Vision : projecteur en RAM (--no-mmproj-offload) : -0,6 Gio de VRAM, images un peu plus lentes a lire.")
     if g.is_blackwell:
         notes.append("Blackwell (sm_120) : runtime CUDA 12.8+ selectionne automatiquement.")
+    if m.id in MEASURED:
+        notes.append(f"Budget calibre sur cette machine : surcout mesure de {MEASURED[m.id]:.0f} Mio pour {m.label}.")
     title = f"{g.name} · {m.label} · {ctx // 1024}k"
     return Plan(backend, priority, s2, s1, budget, True,
                 {"s2": expected_speed(g, m, "gpu"), "s1_ms": [40, 150] if s1_gpu else [100, 350]}, notes, title=title)

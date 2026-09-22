@@ -171,6 +171,11 @@ class Runtime:
         self.message = ""
         self._lock = threading.Lock()
         self.lora: Path | None = None
+        # sonde de VRAM utilisee (Mio, None sans GPU) et rappel de calibration : la difference avant / apres le
+        # demarrage d'un serveur donne sa consommation reelle (NVML ne donne pas la memoire par processus sous
+        # Windows WDDM, la difference globale si)
+        self.vram_probe: Callable[[], float | None] | None = None
+        self.on_measure: Callable[[str, ServerPlan, float], None] | None = None
 
     def public(self) -> dict:
         return {"state": self.state, "message": self.message, "mono": self.mono, "plan": self.plan.to_dict() if self.plan else None,
@@ -203,9 +208,11 @@ class Runtime:
                     return False
                 mm = self.resolve_mmproj(p.s2.model_id) if p.s2.mmproj != "off" else None
                 fam = "bonsai2" if p.s2.model_id.startswith("bonsai2") else "bonsai"
+                before = self._probe()
                 self.s2.start(cmd, build_args(p.s2, model, ports[0], mm, self.lora, fam), ports[0])
                 r = self.s2.wait_ready()
                 if r == "ready":
+                    self._measure("s2", p.s2, before)
                     break
                 if r == "oom":
                     nxt = degrade(p, self.installed())
@@ -228,9 +235,12 @@ class Runtime:
                 else:
                     self._status("starting", "demarrage du classifieur (System One)")
                     for _ in range(3):
+                        before = self._probe()
                         self.s1.start(cmd, build_args(p.s1, s1m, ports[1]), ports[1])
                         r = self.s1.wait_ready(timeout=180)
                         if r == "ready":
+                            if p.s1.device == "gpu":
+                                self._measure("s1", p.s1, before)
                             break
                         if r == "oom" and p.s1.device == "gpu":
                             p = degrade(p, self.installed()) or p  # premier cran utile : classifieur sur CPU
@@ -246,6 +256,23 @@ class Runtime:
             else:
                 self._status("ready", "")
             return True
+
+    def _probe(self) -> float | None:
+        try:
+            return self.vram_probe() if self.vram_probe else None
+        except Exception:
+            return None
+
+    def _measure(self, role: str, sp: ServerPlan, before: float | None) -> None:
+        if before is None or self.on_measure is None or sp.device != "gpu":
+            return
+        time.sleep(1.0)   # laisser les tampons de calcul s'allouer
+        after = self._probe()
+        if after is not None and after > before:
+            try:
+                self.on_measure(role, sp, after - before)
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self.s1.stop()
