@@ -438,7 +438,8 @@ class Prophet:
         t0 = time.perf_counter()
         history = history or []
         self._emit({"type": "turn.start", "request": request, "plan_mode": self.plan_mode, "permission_mode": self.permission_mode, "effort": effort})
-        pre_resp = self.s1.answer({"state": {"request": request, "workspace_files": self.ws.listing()["entries"][:60], "recent_turns": history[-4:]},
+        files = self.ws.listing()["entries"]
+        pre_resp = self.s1.answer({"state": {"request": request, "workspace_files": files[:60], "recent_turns": history[-4:]},
                                    "questions": PROPHET_TURN})
         pre = {k: v.model_dump(exclude={"legend"}) for k, v in pre_resp.answers.items()}
         budget, risk_level = self._budget(pre, effort)
@@ -489,6 +490,9 @@ class Prophet:
                              on_event=track if self.on_event is not None else None, should_stop=self.should_stop,
                              max_context_chars=self.max_context_chars)
             hint = f"(Fast judge: clarify={pre['clarify']['noul']:.2f}, needs_reasoning={pre['needs_reasoning']['noul']:.2f}, risk={risk_level}. Not exposed but creatable: any tool you need.)"
+            # apercu de l'espace de travail dans le message (pas dans le prompt systeme : le prefixe mis en cache reste stable)
+            # -> souvent un aller-retour d'outil de moins, soit plusieurs secondes sur un 27B
+            hint += ("\n(Workspace: " + ", ".join(files[:40]) + (f", ... {len(files) - 40} more" if len(files) > 40 else "") + ")") if files else "\n(Workspace is empty.)"
             res = loop.run([{"role": "system", "content": system}, *history[-6:], {"role": "user", "content": f"{request}\n\n{hint}"}])
             summary = next((c["result"].get("summary") for s in reversed(res.steps) for c in s.tool_calls if c["name"] == "done" and isinstance(c["result"], dict)), None)
             turn = Turn(request, pre, "agent", summary or (res.content or "").strip() or "(no summary)", tool_calls=calls, tools_exposed=exposed,

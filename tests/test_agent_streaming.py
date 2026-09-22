@@ -126,3 +126,14 @@ def test_workspace_edit_grep_glob(tmp_path):
     assert r["ok"] and r["replacements"] == 2 and "-x = f()" in r["__ui__"]["diff"]
     assert ws.edit("src/a.py", "nope", "x")["ok"] is False
     assert ws.run_python("print(2 + 2)")["stdout"].strip() == "4"
+
+
+def test_workspace_preview_is_in_the_user_message_not_the_system_prompt(fake_url, tmp_path):
+    from tests.conftest import MockS2
+    ws = Workspace(tmp_path / "ws")
+    ws.write("src/app.py", "print(1)\n")
+    s2 = MockS2([{"content": "", "tool_calls": [MockS2.tool_call("done", {"summary": "ok"})]}])
+    s1 = SystemOneEngine(LlamaCppBackend(fake_url), model_name="fake")
+    Prophet(s1, s2, ws).handle("Ajoute un test a mon projet")
+    system, user = s2.calls[0][0][0]["content"], s2.calls[0][0][-1]["content"]
+    assert "(Workspace: src/, src/app.py)" in user and "src/app.py" not in system
