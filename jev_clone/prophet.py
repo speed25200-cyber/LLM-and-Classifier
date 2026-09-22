@@ -130,10 +130,13 @@ class Workspace:
     def run(self, cmd: str | list[str], timeout: int = 120) -> dict:
         """Commande shell (PowerShell sous Windows, sh ailleurs) ou argv explicite."""
         if isinstance(cmd, str) and IS_WINDOWS:
-            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd]
+            # sortie en UTF-8 (sinon code page 1252/850 : accents illisibles)
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                   "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; " + cmd]
+        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
         try:
             r = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=self.root, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace")
+                               timeout=timeout, encoding="utf-8", errors="replace", env=env)
             return {"ok": r.returncode == 0, "returncode": r.returncode, "stdout": r.stdout[-6000:], "stderr": r.stderr[-3000:]}
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": f"timeout apres {timeout}s"}
