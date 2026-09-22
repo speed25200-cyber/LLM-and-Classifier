@@ -71,6 +71,10 @@ def main(argv=None) -> None:
     from prophet_studio.config import Paths, data_dir
     root = Path(args.data_dir) if args.data_dir else (data_dir() / "demo" if args.demo else data_dir())
     paths = Paths(root)
+    if sys.stdout is None or sys.stderr is None:   # pythonw (raccourci Windows sans console) : journal sur disque
+        log = open(paths.logs / "core.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or log
+        sys.stderr = sys.stderr or log
 
     if not args.parent_pid:
         other = _existing_instance(paths.core_info)
