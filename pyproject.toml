@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jev-bonsai-fusion"
-version = "0.1.0"
-description = "Clone open-source de Jev (System One, decisions typees calibrees) fusionne avec Bonsai 2 27B (System Two) pour RTX 4060 / materiel minimal"
+version = "0.2.0"
+description = "Prophet Studio : clone open-source de Jev (System One) fusionne avec Bonsai 2 27B (System Two), agent local pour RTX 5060 / 4060 et materiel minimal"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = ["fastapi>=0.110", "uvicorn>=0.27"]
+studio = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "websockets>=12", "psutil>=5.9", "nvidia-ml-py>=12.535", "sherpa-onnx>=1.12"]
 torch = ["torch>=2.3", "transformers>=4.57", "peft>=0.13"]
 train = ["torch>=2.3", "transformers>=4.57", "peft>=0.13", "datasets>=2.19", "accelerate>=0.30", "bitsandbytes>=0.43"]
 dev = ["pytest>=8", "httpx>=0.27", "playwright>=1.45"]
@@ -24,9 +25,13 @@ agent = ["playwright>=1.45"]
 
 [project.scripts]
 jev = "jev_clone.cli:main"
+prophet-studio = "prophet_studio.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["jev_clone*"]
+include = ["jev_clone*", "prophet_studio*"]
+
+[tool.setuptools.package-data]
+prophet_studio = ["web/*", "web/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

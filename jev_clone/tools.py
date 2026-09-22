@@ -124,12 +124,20 @@ class AgentLoop:
     """Boucle d'agent : Bonsai (chat + tools) appelle le clone et les outils applicatifs.
 
     extra_tools : {name: (definition_openai, fonction(args) -> resultat JSON-serialisable)}.
-    Les outils dont la fonction renvoie {"__stop__": True, ...} terminent la boucle (ex. `done`)."""
+    Les outils dont la fonction renvoie {"__stop__": True, ...} terminent la boucle (ex. `done`).
+    Un resultat peut porter une cle `__ui__` (diff, apercu...) : elle part dans l'evenement `tool.result`
+    pour l'interface mais n'est jamais renvoyee au modele (economie de contexte).
+
+    on_event(evt) : flux d'evenements pour une interface (texte et reflexion diffuses token par token,
+    appels d'outils, resultats, statistiques du modele). should_stop() : annulation cooperative.
+    max_context_chars : au-dela, les anciens resultats d'outils sont resumes (contexte de 8-16 k sur 8 Go)."""
 
     def __init__(self, s2_backend, toolbox: SystemOneToolbox | None = None,
                  extra_tools: dict[str, tuple[dict, Callable[[dict], Any]]] | None = None,
                  max_turns: int = 10, thinking_budget: int | None = 1024, max_tokens: int = 1024,
-                 ledger: str | Path | None = None):
+                 ledger: str | Path | None = None, on_event: Callable[[dict], None] | None = None,
+                 should_stop: Callable[[], bool] | None = None, max_context_chars: int | None = None,
+                 keep_recent: int = 6):
         self.s2 = s2_backend
         self.toolbox = toolbox
         self.extra = extra_tools or {}
@@ -137,6 +145,10 @@ class AgentLoop:
         self.thinking_budget = thinking_budget
         self.max_tokens = max_tokens
         self.ledger = Path(ledger) if ledger else None
+        self.on_event = on_event
+        self.should_stop = should_stop or (lambda: False)
+        self.max_context_chars = max_context_chars
+        self.keep_recent = keep_recent
 
     def tool_definitions(self) -> list[dict]:
         defs = self.toolbox.definitions() if self.toolbox else []
@@ -149,46 +161,116 @@ class AgentLoop:
             return self.toolbox.call(name, args)
         return {"error": f"unknown tool {name}"}
 
+    def _emit(self, evt: dict) -> None:
+        if self.on_event is not None:
+            try:
+                self.on_event(evt)
+            except Exception:  # une interface defaillante ne doit jamais casser l'agent
+                pass
+
+    @staticmethod
+    def _size(m: dict) -> int:
+        return len(m.get("content") or "") + sum(len(json.dumps(tc)) for tc in m.get("tool_calls") or [])
+
+    def compact(self, msgs: list[dict]) -> list[dict]:
+        """Resume les anciens messages d'outil (et longs messages assistant) tant que le total depasse
+        max_context_chars. Garde intacts : system, premier message utilisateur, `keep_recent` derniers messages."""
+        if not self.max_context_chars:
+            return msgs
+        total = sum(self._size(m) for m in msgs)
+        if total <= self.max_context_chars:
+            return msgs
+        out = [dict(m) for m in msgs]
+        first_user = next((i for i, m in enumerate(out) if m.get("role") == "user"), 0)
+        protected = {0, first_user} | set(range(max(0, len(out) - self.keep_recent), len(out)))
+        for i, m in enumerate(out):
+            if total <= self.max_context_chars:
+                break
+            if i in protected or m.get("role") not in ("tool", "assistant"):
+                continue
+            c = m.get("content") or ""
+            if len(c) > 400:
+                short = c[:300] + f" ...[compacte : {len(c) - 300} caracteres omis]"
+                total -= len(c) - len(short)
+                m["content"] = short
+        return out
+
+    @staticmethod
+    def _preview_args(args: dict, limit: int = 20000) -> dict:
+        return {k: (v[:limit] + "..." if isinstance(v, str) and len(v) > limit else v) for k, v in args.items()}
+
     def run(self, messages: list[dict], thinking_budget: int | None = None) -> AgentResult:
         msgs = list(messages)
         steps: list[AgentStep] = []
         budget = self.thinking_budget if thinking_budget is None else thinking_budget
         stopped = "max_turns"
         for turn in range(self.max_turns):
+            if self.should_stop():
+                stopped = "cancelled"; break
             t0 = time.perf_counter()
+            kw: dict = {}
+            if self.on_event is not None:
+                named: set[int] = set()
+
+                def on_delta(d: dict, _named=named) -> None:
+                    if d["type"] == "content":
+                        self._emit({"type": "text.delta", "text": d["text"]})
+                    elif d["type"] == "reasoning":
+                        self._emit({"type": "thinking.delta", "text": d["text"]})
+                    elif d["type"] == "tool_call" and d.get("name") and d["index"] not in _named:
+                        _named.add(d["index"]); self._emit({"type": "tool.pending", "index": d["index"], "name": d["name"]})
+                kw = {"on_delta": on_delta, "should_stop": self.should_stop}
+                self._emit({"type": "llm.start", "turn": turn, "thinking_budget": budget})
+            msgs = self.compact(msgs)
             try:
                 resp = self.s2.chat(msgs, max_tokens=self.max_tokens, thinking_budget=budget, temperature=0.2,
-                                    tools=self.tool_definitions())
+                                    tools=self.tool_definitions(), **kw)
             except Exception as e:  # serveur indisponible, contexte depasse malgre les reessais... : on rend la main proprement
                 steps.append(AgentStep(turn=turn, content=f"[erreur du modele de raisonnement : {str(e)[:200]}]",
                                        ms=round((time.perf_counter() - t0) * 1000, 1)))
+                self._emit({"type": "llm.error", "error": str(e)[:300]})
                 stopped = "error"; break
             msg = resp["choices"][0]["message"]
+            self._emit({"type": "llm.end", "turn": turn, "timings": resp.get("timings") or {}, "usage": resp.get("usage") or {},
+                        "finish_reason": resp["choices"][0].get("finish_reason")})
             step = AgentStep(turn=turn, content=msg.get("content"), reasoning=msg.get("reasoning_content"))
             calls = msg.get("tool_calls") or []
+            if resp.get("cancelled"):
+                calls = []
             assistant = {"role": "assistant", "content": msg.get("content") or ""}
             if calls:
                 assistant["tool_calls"] = calls
             msgs.append(assistant)
             stop = False
-            for tc in calls:
+            for k, tc in enumerate(calls):
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
+                cid = tc.get("id") or f"call_{turn}_{k}"
                 try:
                     args = json.loads(fn.get("arguments") or "{}") if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
                 except json.JSONDecodeError:
                     args = {}
-                try:
-                    result = self.execute(name, args)
-                except Exception as e:  # l'outil a echoue : on le dit au modele plutot que de planter la boucle
-                    result = {"error": str(e)}
+                if self.should_stop():
+                    result = {"ok": False, "error": "cancelled by the user"}
+                else:
+                    self._emit({"type": "tool.call", "id": cid, "name": name, "args": self._preview_args(args)})
+                    try:
+                        result = self.execute(name, args)
+                    except Exception as e:  # l'outil a echoue : on le dit au modele plutot que de planter la boucle
+                        result = {"error": str(e)}
+                ui = result.pop("__ui__", None) if isinstance(result, dict) else None
+                self._emit({"type": "tool.result", "id": cid, "name": name, "ui": ui,
+                            "ok": (result.get("ok", "error" not in result) if isinstance(result, dict) else True),
+                            "result": result})
                 if isinstance(result, dict) and result.get("__stop__"):
                     stop = True
                 step.tool_calls.append({"name": name, "args": args, "result": result})
-                msgs.append({"role": "tool", "tool_call_id": tc.get("id", f"call_{turn}"), "name": name,
+                msgs.append({"role": "tool", "tool_call_id": cid, "name": name,
                              "content": json.dumps(result, ensure_ascii=False, default=str)})
             step.ms = round((time.perf_counter() - t0) * 1000, 1)
             steps.append(step)
+            if resp.get("cancelled") or self.should_stop():
+                stopped = "cancelled"; break
             if stop:
                 stopped = "stop_tool"; break
             if not calls:

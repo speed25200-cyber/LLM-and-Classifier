@@ -18,6 +18,7 @@ import concurrent.futures as cf
 import json
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import requests
@@ -230,7 +231,12 @@ class LlamaCppBackend:
 
     # ---- System Two : generation classique (pour la fusion) ---------------------------------
     def chat(self, messages: list[dict], max_tokens: int = 512, thinking_budget: int | None = None,
-             temperature: float = 0.7, tools: list | None = None, extra: dict | None = None) -> dict:
+             temperature: float = 0.7, tools: list | None = None, extra: dict | None = None,
+             on_delta: Callable[[dict], None] | None = None, should_stop: Callable[[], bool] | None = None) -> dict:
+        """/v1/chat/completions. Avec `on_delta`, la reponse est diffusee (SSE) : on_delta recoit
+        {"type": "content"|"reasoning", "text"} et {"type": "tool_call", "index", "name", "args_delta"} au fil
+        de l'eau ; le retour a la meme forme qu'une reponse non diffusee (message complet, usage, timings).
+        `should_stop()` vrai -> la connexion est fermee (llama-server arrete la generation) et on rend ce qui existe."""
         payload: dict = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
         if tools:
             payload["tools"] = tools
@@ -242,20 +248,78 @@ class LlamaCppBackend:
         if extra:
             payload.update(extra)
         payload = self._with_lora(payload)
+        if on_delta is not None:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         # Si la demande depasse le contexte du slot (prompt + max_tokens > n_ctx), llama-server repond 500 ;
         # on reduit max_tokens et on reessaie plutot que de faire echouer tout le tour de l'agent.
         for attempt in range(4):
-            r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout)
+            r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout,
+                                   stream=on_delta is not None)
             if r.status_code < 400:
-                return r.json()
+                if on_delta is None:
+                    return r.json()
+                return self._read_stream(r, on_delta, should_stop)
             msg = ""
             try:
                 msg = json.dumps(r.json())
             except Exception:
                 msg = r.text
-            if r.status_code == 500 and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
+            if r.status_code in (400, 500) and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
                 payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
                 continue
             r.raise_for_status()
         r.raise_for_status()
         return r.json()
+
+    @staticmethod
+    def _read_stream(r, on_delta: Callable[[dict], None], should_stop: Callable[[], bool] | None) -> dict:
+        content: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict] = {}
+        finish, usage, timings, stopped = None, {}, {}, False
+        try:
+            for raw in r.iter_lines(decode_unicode=True):
+                if should_stop is not None and should_stop():
+                    stopped = True
+                    break
+                if not raw or not raw.startswith("data:"):
+                    continue
+                data = raw[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("error"):
+                    raise RuntimeError(str(chunk["error"])[:300])
+                usage = chunk.get("usage") or usage
+                timings = chunk.get("timings") or timings
+                for ch in chunk.get("choices") or []:
+                    finish = ch.get("finish_reason") or finish
+                    d = ch.get("delta") or {}
+                    if d.get("reasoning_content"):
+                        reasoning.append(d["reasoning_content"]); on_delta({"type": "reasoning", "text": d["reasoning_content"]})
+                    if d.get("content"):
+                        content.append(d["content"]); on_delta({"type": "content", "text": d["content"]})
+                    for tc in d.get("tool_calls") or []:
+                        i = int(tc.get("index", len(calls)))
+                        cur = calls.setdefault(i, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                        fn = tc.get("function") or {}
+                        if tc.get("id"):
+                            cur["id"] = tc["id"]
+                        if fn.get("name"):
+                            cur["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            cur["function"]["arguments"] += fn["arguments"]
+                        on_delta({"type": "tool_call", "index": i, "name": cur["function"]["name"], "args_delta": fn.get("arguments") or ""})
+        finally:
+            r.close()
+        msg: dict = {"role": "assistant", "content": "".join(content)}
+        if reasoning:
+            msg["reasoning_content"] = "".join(reasoning)
+        if calls:
+            msg["tool_calls"] = [dict(calls[i], id=calls[i]["id"] or f"call_{i}") for i in sorted(calls)]
+        return {"choices": [{"index": 0, "message": msg, "finish_reason": "cancelled" if stopped else finish}],
+                "usage": usage, "timings": timings, "cancelled": stopped}
