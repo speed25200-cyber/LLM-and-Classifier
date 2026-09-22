@@ -12,3 +12,5 @@ data/
 .pytest_cache/
 eval/results/
 third_party/
+node_modules/
+desktop/src-tauri/target/

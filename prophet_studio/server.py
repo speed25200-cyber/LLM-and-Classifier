@@ -65,6 +65,9 @@ class Studio:
 
     # ---- demo : faux serveurs lances par le vrai superviseur ------------------------------------------------------------
     def _prepare_demo(self) -> None:
+        from prophet_studio.config import Settings
+        if self.settings.get().workspace == Settings().workspace:   # la demo n'ecrit jamais dans le vrai ~/Prophet
+            self.settings.update({"workspace": str(self.paths.root / "workspace")})
         for mid in ("bonsai2-27b-ptq1", "ternary-1.7b"):
             f = self.paths.models / mid / f"{mid}-demo.gguf"
             f.parent.mkdir(parents=True, exist_ok=True)

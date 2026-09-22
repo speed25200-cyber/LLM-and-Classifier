@@ -24,21 +24,32 @@ def new_id() -> str:
 
 
 # ---- reducteur de transcription (miroir de ui/src/lib/transcript.ts) -------------------------------------------------
+def _close_thinking(blocks: list, ts: float) -> None:
+    if blocks and blocks[-1]["type"] == "thinking" and blocks[-1].get("ms") is None and blocks[-1].get("started"):
+        blocks[-1]["ms"] = round((ts - blocks[-1]["started"]) * 1000, 1)
+
+
 def reduce_event(item: dict, evt: dict) -> None:
     blocks = item.setdefault("blocks", [])
     t = evt.get("type")
+    ts = evt.get("ts") or time.time()
     if t in ("thinking.delta", "text.delta"):
         kind = "thinking" if t == "thinking.delta" else "text"
+        if kind == "text":
+            _close_thinking(blocks, ts)
         if blocks and blocks[-1]["type"] == kind:
             blocks[-1]["text"] += evt.get("text", "")
         else:
-            blocks.append({"type": kind, "text": evt.get("text", "")})
+            blocks.append({"type": kind, "text": evt.get("text", ""), **({"started": ts} if kind == "thinking" else {})})
+    elif t in ("tool.pending", "llm.end"):
+        _close_thinking(blocks, ts)
     elif t == "tool.call":
-        blocks.append({"type": "tool", "id": evt["id"], "name": evt["name"], "args": evt.get("args", {}), "status": "running"})
+        _close_thinking(blocks, ts)
+        blocks.append({"type": "tool", "id": evt["id"], "name": evt["name"], "args": evt.get("args", {}), "status": "running", "started": ts})
     elif t == "tool.result":
         for b in reversed(blocks):
             if b["type"] == "tool" and b["id"] == evt["id"]:
-                b.update(status="done" if evt.get("ok") else "error", ok=evt.get("ok"), result=evt.get("result"), ui=evt.get("ui"))
+                b.update(status="done" if evt.get("ok") else "error", ok=evt.get("ok"), result=evt.get("result"), ui=evt.get("ui"), ended=ts)
                 break
     elif t == "permission.request":
         blocks.append({"type": "permission", "id": evt["id"], "tool": evt.get("tool"), "describe": evt.get("describe"),
@@ -150,7 +161,7 @@ class AgentService:
         self.store.save(session)
 
         def emit(evt: dict) -> None:
-            evt = {**evt, "session_id": sid, "turn_id": turn_id}
+            evt = {**evt, "session_id": sid, "turn_id": turn_id, "ts": round(time.time(), 3)}
             reduce_event(item, evt)
             self.publish(evt)
 

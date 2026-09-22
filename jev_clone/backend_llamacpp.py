@@ -279,7 +279,10 @@ class LlamaCppBackend:
         calls: dict[int, dict] = {}
         finish, usage, timings, stopped = None, {}, {}, False
         try:
-            for raw in r.iter_lines(decode_unicode=True):
+            # llama-server diffuse en "chunked" : chunk_size=None rend chaque evenement SSE des son arrivee (512 par
+            # defaut = rafales de tokens). Sans "chunked", None attendrait la fin du corps : lectures de 64 octets.
+            chunked = "chunked" in r.headers.get("Transfer-Encoding", "").lower()
+            for raw in r.iter_lines(chunk_size=None if chunked else 64, decode_unicode=True):
                 if should_stop is not None and should_stop():
                     stopped = True
                     break

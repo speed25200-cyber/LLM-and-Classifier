@@ -232,13 +232,17 @@ class FakeLlama:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")   # comme llama-server (cpp-httplib)
                 self.send_header("Connection", "close")
                 self.end_headers()
                 delay = 1.0 / fake.tps * 2 if fake.tps else 0.0
 
+                def chunk(b: bytes) -> None:
+                    self.wfile.write(f"{len(b):X}\r\n".encode() + b + b"\r\n"); self.wfile.flush()
+
                 def send(obj) -> bool:
                     try:
-                        self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()); self.wfile.flush()
+                        chunk(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode())
                         if delay:
                             time.sleep(delay)
                         return True
@@ -262,7 +266,8 @@ class FakeLlama:
                 send({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if calls else "stop"}], "timings": timings,
                       "usage": {"completion_tokens": ntok}})
                 try:
-                    self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+                    chunk(b"data: [DONE]\n\n")
+                    self.wfile.write(b"0\r\n\r\n"); self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 self.close_connection = True
