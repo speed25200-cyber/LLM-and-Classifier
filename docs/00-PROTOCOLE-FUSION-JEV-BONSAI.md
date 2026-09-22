@@ -324,6 +324,17 @@ Donnees : 82 graines manuscrites -> synthese par Bonsai (`training/make_syntheti
 **Critere de sortie** : 10 demandes de creation d'application executees de bout en bout (fichiers, tests, lancement)
 avec >= 8 reussites ; 0 commande a risque >= 2 executee sans confirmation ; pre-traitement p50 <= 250 ms.
 
+### Phase 14 - Prophet Studio : l'application (RTX 5060 en cible)
+
+[12 Prophet Studio](12-PROPHET-STUDIO.md). Remplace les phases 1-5 pour un utilisateur final : installation en une
+ligne (ou installeur Windows), assistant qui detecte la carte, calcule le plan VRAM (RTX 5060 : Bonsai 2 PTQ1_0
+entier sur GPU, 24-32 k, classifieur sur CPU), telecharge runtime (CUDA 12.8+ pour Blackwell), modeles et voix,
+puis supervise les deux serveurs (echelle anti-OOM, mode mono). L'agent Prophet tourne en flux dans une interface
+facon Claude Code, avec voix et computer use (navigateur, bureau Windows).
+**Critere de sortie** : sur une RTX 5060 neuve, de l'installeur au premier tour d'agent en moins de 15 minutes
+(hors telechargement) sans ligne de commande ; `Mesurer` >= 45 tok/s et decisions p50 <= 300 ms ; aucune erreur
+de console dans l'interface ; commandes vocales « nouvelle session », « stop », « accepte » reconnues en FR.
+
 ### Phase 9 - Exploitation
 
 * **Ordre de demarrage** : Bonsai d'abord (gros allocataire), puis le clone, puis `jev serve`. Verifier

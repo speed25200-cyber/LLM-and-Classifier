@@ -28,6 +28,7 @@ case "${BONSAI_MMPROJ:-off}" in
     gpu) MP="$(find_mmproj "$BONSAI_FAMILY" "$BONSAI_SIZE" || true)"; [ -n "$MP" ] && mm="--mmproj $MP" || mm="--no-mmproj" ;;
 esac
 kv=""; [ "${BONSAI_KV4:-0}" = 1 ] && kv="--cache-type-k q4_0 --cache-type-v q4_0"
+[ -n "${BONSAI_KV_TYPE:-}" ] && kv="--cache-type-k $BONSAI_KV_TYPE --cache-type-v $BONSAI_KV_TYPE"   # q8_0 / f16 (cartes 12-16 Go)
 if [ "$BONSAI_FAMILY" = bonsai2 ]; then SAMPLING="--temp 1.0 --top-p 0.95 --top-k 20"; else SAMPLING="--temp 0.7 --top-p 0.95 --top-k 20 --min-p 0"; fi
 
 echo "=== Bonsai (System Two) ==="

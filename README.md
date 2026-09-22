@@ -1,9 +1,44 @@
-# LLM-and-Classifier : fusion Jev-clone (System One) x Bonsai 2 27B (System Two) sur RTX 4060
+# LLM-and-Classifier : Prophet Studio, fusion Jev-clone (System One) x Bonsai 2 27B (System Two) sur RTX 5060
 
 Un **classificateur/decideur** ultra-rapide (clone ouvert de [Jev](docs/01-JEV-typesafe-analyse.md), le
 "System One model" de TypeSafe AI) fusionne avec un **LLM** de 27 milliards de parametres qui tient dans
 6 Go ([Bonsai 2 27B](docs/02-BONSAI-2-27B-analyse.md), PrismML, base Qwen3.8-27B), le tout sur **une RTX
-4060 ou 5060 8 Go** ou moins (profils CPU seul et GPU 4 Go inclus).
+5060 8 Go** (ou 4060, 5060 Ti 16 Go, CPU seul), dans une application locale facon Claude Code avec commandes vocales.
+
+## Prophet Studio : l'application
+
+![Prophet Studio : un tour d'agent](docs/img/studio-agent.jpg)
+
+```powershell
+# Windows (RTX 5060 : pilote NVIDIA >= 570)
+irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.ps1 | iex
+```
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.sh | sh
+# ou depuis les sources :  uv sync --extra studio && uv run prophet-studio      (sans modele : --demo)
+```
+L'assistant de premier lancement detecte la carte, calcule la configuration optimale (RTX 5060 : Bonsai 2 27B
+PTQ1_0 entier sur GPU, 24-32 k de contexte, classifieur sur CPU, ~47-59 tok/s estimes), installe en un clic le
+runtime llama.cpp adapte (CUDA 12.8+ pour Blackwell), les modeles et les voix, puis demarre tout.
+
+* **Agent facon Claude Code** : flux token par token, reflexion repliable, cartes d'outils (diffs, terminal,
+  fichiers), `edit_file` / `grep` / `glob`, mode plan, effort de reflexion, commandes `/`, mentions `@fichier`,
+  palette Ctrl+K, inspecteur de fichiers, sessions rejouables.
+* **La fusion visible a chaque tour** : le classifieur decide en ~50-150 ms (reponse directe ou agent, budget de
+  reflexion, risque, outils pertinents), juge chaque commande avant execution (autorisations *Smart*) et verifie
+  la reponse finale.
+* **Voix** : push-to-talk (Ctrl+Maj+Espace) ou mains libres avec mot d'eveil, commandes vocales FR/EN tranchees
+  par le classifieur, lecture des reponses ; tout sur CPU, la VRAM reste au modele.
+* **Computer use** : navigateur (arbre ARIA) et bureau Windows (UI Automation), le classifieur decide chaque pas.
+* **Sobre** : ~350 Ko d'interface, aucune ressource distante, rendu CPU par defaut dans l'application de bureau,
+  animations en pause fenetre cachee ; planificateur VRAM et echelle anti-OOM automatiques.
+* **Ouvert** : API locale compatible OpenAI (`/v1/chat/completions`) et TypeSafe (`/v1/systemone`), protegee par jeton.
+
+Documentation complete : **[docs/12-PROPHET-STUDIO.md](docs/12-PROPHET-STUDIO.md)** (installation, architecture,
+choix pour la RTX 5060, voix, computer use, securite, ce qui est verifie).
+
+## Le protocole de fusion
 
 **Lire d'abord : [docs/00-PROTOCOLE-FUSION-JEV-BONSAI.md](docs/00-PROTOCOLE-FUSION-JEV-BONSAI.md)** (le
 protocole complet, en 9 phases, avec criteres d'acceptation, risques et commandes).
@@ -18,9 +53,10 @@ protocole complet, en 9 phases, avec criteres d'acceptation, risques et commande
    en cas de doute (`docs/06-AGENT-COMPUTER-USE.md`).
 4. Tout est journalise ; Bonsai etiquette les cas douteux ; le clone est recalibre / re-entraine.
 
-## Demarrage rapide (RTX 4060)
+## Demarrage rapide en ligne de commande (RTX 4060 / 5060)
 ```bash
 PROFILE=scripts/profiles/rtx4060-8gb-qualite.env ./scripts/setup.sh     # binaires PrismML + poids + venv
+# RTX 5060 : PROFILE=scripts/profiles/rtx5060-8gb-equilibre.env (ou rtx5060-8gb-vitesse, rtx5060ti-16gb)
 ./scripts/start_bonsai.sh        # terminal 1 : Bonsai 2 27B PTQ1_0 sur :8080
 ./scripts/start_jev_clone.sh     # terminal 2 : Ternary-Bonsai-1.7B (clone niveau 0) sur :8081
 source .venv/bin/activate
@@ -36,6 +72,8 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 ## Contenu du depot
 | Chemin | Contenu |
 |---|---|
+| `prophet_studio/`, `ui/`, `desktop/`, `installer/` | **Prophet Studio** : coeur (materiel, planificateur VRAM, installateur, superviseur, sessions, voix, API), interface Svelte, application Tauri, installeurs en une ligne ([docs/12](docs/12-PROPHET-STUDIO.md)) |
+| `jev_clone/desktop_use.py` | computer use sur le bureau (Windows UI Automation) a deux vitesses |
 | `docs/00-PROTOCOLE-FUSION-JEV-BONSAI.md` | **le protocole complet** |
 | `docs/01-JEV-typesafe-analyse.md` | comment Jev fonctionne (contrat, mecanisme deduit, RLCD, benchmarks, clones ouverts) |
 | `docs/02-BONSAI-2-27B-analyse.md` | Bonsai 2 27B : architecture, formats, qualite, vitesse, memoire, runtime |
@@ -57,7 +95,7 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 | `eval/` | banc de mesure : les 60 cas et les sorties reelles de Jev (jev-benchmark) mesures avec le meme code que le clone ; MMLU-1200 |
 | `jev_clone/conformal.py` | ensembles de prediction conformes (couverture garantie) et porte a risque controle |
 | `jev_clone/engine_torch.py` | moteur en passe unique (toutes les questions en un forward), cible < 50 ms |
-| `tests/` | 56 tests (hors ligne, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
+| `tests/` | 94 tests (hors ligne, faux llama-server, Studio de bout en bout, voix, bureau, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
 
 ## Ce qui est verifie / ce qui ne l'est pas
 * Verifie ici : le paquet `jev_clone` (tests unitaires), l'agent navigateur sur une page locale (Playwright), la lecture par grammaire et le cache de prefixe

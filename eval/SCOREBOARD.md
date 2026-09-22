@@ -26,3 +26,18 @@ Seuls les chiffres **publics** de Jev sont opposables. Les colonnes "clone" se r
 Protocole de mesure : `python -m eval.jev_benchmark --server ... --name clone-l0 --repeat 5` puis `--analyze` ;
 `python -m eval.mmlu_ece --server ... --n 1200` (Colab) ; latence = `jev bench` et la colonne p50 du benchmark.
 Toujours 5 repetitions sur les 60 cas (n=60 a une variance de +/- 3 points, notee par l'auteur du benchmark).
+
+## Machine cible : RTX 5060 8 Go (Prophet Studio, bouton **Mesurer** ou `POST /api/bench`)
+
+Estimations du planificateur a remplacer par des mesures (`runs/bench.jsonl` les conserve, avec le plan utilise).
+
+| Mesure (RTX 5060 8 Go, pilote >= 570, build CUDA 12.8+) | Estimation | Mesure |
+|---|---|---|
+| Bonsai 2 27B PTQ1_0, generation (tok/s) | 47-59 | |
+| Bonsai 2 27B PTQ1_0, prefill (tok/s) | a mesurer | |
+| Bonsai 27B Q1_0 (priorite vitesse), generation (tok/s) | 53-65 | |
+| Contexte obtenu sans OOM (ecran sur la 5060 / sur l'iGPU) | 24 k / 32 k (KV q4_0) | |
+| Decision System One p50 / p95, classifieur 1.7B sur CPU (ms) | 100-350 | |
+| Decision System One p50, classifieur sur GPU (priorite vitesse) (ms) | 40-150 | |
+| Reconnaissance vocale (Parakeet v3, CPU) : latence pour 3 s de parole | a mesurer | |
+| Commande vocale de bout en bout (fin de parole -> action) | cible < 600 ms | |
