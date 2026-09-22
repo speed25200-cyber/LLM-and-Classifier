@@ -211,6 +211,7 @@ export interface TurnStats {
   tokens?: number;
   tok_s?: number | null;
   prompt_ms?: number;
+  ctx_tokens?: number;
 }
 
 export interface AssistantItem {

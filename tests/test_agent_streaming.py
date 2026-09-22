@@ -62,6 +62,7 @@ def test_prophet_full_agent_turn_emits_events_and_writes_files(fake_url, tmp_pat
     assert "index.html" in py["result"]["stdout"]
     assert (ws.root / "index.html").exists() and t.path == "agent" and "index.html" in t.response
     assert t.stats["llm_calls"] == 4 and t.stats["tok_s"] > 0 and t.verification > 0.5
+    assert t.stats["ctx_tokens"] > 500   # contexte occupe (prompt + generation) remonte a l interface
 
 
 def test_direct_path_streams_text(fake_url, tmp_path):

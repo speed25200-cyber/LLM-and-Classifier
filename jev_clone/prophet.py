@@ -462,6 +462,9 @@ class Prophet:
                 stats["prompt_ms"] += float(tm.get("prompt_ms") or 0)
                 if tm.get("predicted_per_second"):
                     stats["tok_s"] = round(float(tm["predicted_per_second"]), 1)
+                us = evt.get("usage") or {}
+                used = int(us.get("prompt_tokens") or 0) + int(us.get("completion_tokens") or 0) or int(tm.get("prompt_n") or 0) + int(tm.get("cache_n") or 0) + int(tm.get("predicted_n") or 0)
+                stats["ctx_tokens"] = max(stats.get("ctx_tokens", 0), used)   # contexte occupe au plus haut du tour
             self._emit(evt)
 
         if direct:

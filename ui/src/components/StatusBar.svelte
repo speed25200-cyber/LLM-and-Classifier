@@ -28,7 +28,11 @@
     </span>
     {#if plan}
       <span class="it plan" title={plan.notes.join("\n")}>{plan.title}{plan.rung ? " · ajuste" : ""}</span>
-      <span class="it">ctx {ctxLabel(plan.s2.ctx)}</span>
+      {@const used = last?.stats?.ctx_tokens ?? 0}
+      <span class="it" title="Contexte occupe par la conversation / fenetre de Bonsai{used ? ' (au dernier tour)' : ''}">
+        ctx {used ? `${ctxLabel(used)} / ` : ""}{ctxLabel(plan.s2.ctx)}
+        {#if used}<span class="mini" class:hot={used / plan.s2.ctx > 0.8}><i style="transform: scaleX({Math.min(1, used / plan.s2.ctx)})"></i></span>{/if}
+      </span>
     {/if}
     {#if app.core?.runtime.mono}<span class="it warn">mode mono</span>{/if}
     {#if dl.length}
@@ -71,6 +75,7 @@
   .dl .spinner { width: 10px; height: 10px; border-width: 1.5px; }
   .mini { position: relative; display: inline-block; width: 38px; height: 4px; border-radius: 4px; background: var(--surface-3); overflow: hidden; margin-left: 2px; }
   .mini i { position: absolute; inset: 0; background: var(--grad); transform-origin: left; transition: transform 600ms var(--ease); }
+  .mini.hot i { background: var(--warn); }
   .voice.on { color: var(--s1); background: var(--s1-soft); }
   :global(.status .err) { color: var(--err); }
 </style>

@@ -219,6 +219,7 @@ class FakeLlama:
                 calls = [{"id": f"call_{int(time.time() * 1000) % 100000}_{i}", "type": "function",
                           "function": {"name": nm, "arguments": json.dumps(a, ensure_ascii=False)}} for i, (nm, a) in enumerate(rep.get("tool_calls", []))]
                 ntok = max(1, (len(think) + len(rep.get("content", "")) + sum(len(c["function"]["arguments"]) for c in calls)) // 4)
+                ptok = max(1, len(json.dumps(msgs, ensure_ascii=False)) // 4 + (len(json.dumps(tools)) // 4 if tools else 0))
                 timings = {"prompt_n": 900, "prompt_ms": 310.0, "predicted_n": ntok, "predicted_ms": ntok / (fake.tps or 48) * 1000,
                            "predicted_per_second": fake.tps or 48.0}
                 if not body.get("stream"):
@@ -228,7 +229,7 @@ class FakeLlama:
                     if calls:
                         msg["tool_calls"] = calls
                     return self._json(200, {"choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if calls else "stop"}],
-                                            "usage": {"completion_tokens": ntok}, "timings": timings})
+                                            "usage": {"prompt_tokens": ptok, "completion_tokens": ntok, "total_tokens": ptok + ntok}, "timings": timings})
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -264,7 +265,7 @@ class FakeLlama:
                         if not send(delta({"tool_calls": [{"index": i, "function": {"arguments": a[k:k + 48]}}]})):
                             return
                 send({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if calls else "stop"}], "timings": timings,
-                      "usage": {"completion_tokens": ntok}})
+                      "usage": {"prompt_tokens": ptok, "completion_tokens": ntok, "total_tokens": ptok + ntok}})
                 try:
                     chunk(b"data: [DONE]\n\n")
                     self.wfile.write(b"0\r\n\r\n"); self.wfile.flush()
