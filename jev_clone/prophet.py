@@ -84,6 +84,12 @@ class Turn:
     stats: dict = field(default_factory=dict)
 
 
+def _clip(x, n: int) -> str:
+    """Texte borne pour les etats du classifieur (debut + fin, qui portent l'essentiel)."""
+    t = x if isinstance(x, str) else json.dumps(x, ensure_ascii=False, default=str)
+    return t if len(t) <= n else t[: n * 2 // 3] + " [...] " + t[-n // 3:]
+
+
 class Workspace:
     def __init__(self, root: str | Path):
         self.root = Path(root).resolve()
@@ -283,8 +289,12 @@ class Prophet:
 
     # ---- garde-fou -----------------------------------------------------------------------------------------
     def judge(self, request: str, proposed: str) -> dict:
-        r = self.s1.answer({"state": {"user_request": request, "proposed_action": proposed},
-                            "questions": {"tool_risk": GUARDRAILS["tool_risk"], "risk": GUARDRAILS["risk"], "policy_violation": GUARDRAILS["policy_violation"]}})
+        try:
+            r = self.s1.answer({"state": {"user_request": _clip(request, 1200), "proposed_action": _clip(proposed, 2000)},
+                                "questions": {"tool_risk": GUARDRAILS["tool_risk"], "risk": GUARDRAILS["risk"], "policy_violation": GUARDRAILS["policy_violation"]}})
+        except Exception as e:   # classifieur indisponible : prudence, on demande
+            return {"tool_risk": "unknown", "tool_risk_conf": 0.0, "risk": 2.0, "policy_violation": 0.0, "needs_confirmation": True,
+                    "latency_ms": 0.0, "s1_error": str(e)[:200]}
         a = r.answers
         j = {"tool_risk": a["tool_risk"].choice, "tool_risk_conf": a["tool_risk"].confidence, "risk": a["risk"].score, "policy_violation": a["policy_violation"].noul}
         j["needs_confirmation"] = j["tool_risk"] in ("destructive", "privileged", "exfiltration") or round(j["risk"]) >= self.risk_confirm_level or j["policy_violation"] >= 0.5
@@ -416,7 +426,10 @@ class Prophet:
         if not names:
             return list(CORE_TOOLS)
         qs = {f"t_{n}": {"type": "noul", "instructions": f"Would the tool `{n}` ({catalog[n][0]['function']['description'][:120]}) plausibly be useful for this request?"} for n in names}
-        r = self.s1.answer({"state": {"request": request}, "questions": qs})
+        try:
+            r = self.s1.answer({"state": {"request": _clip(request, 2000)}, "questions": qs})
+        except Exception:
+            return names[: max(1, self.max_tools - len(CORE_TOOLS))] + [c for c in CORE_TOOLS if c in catalog]
         ranked = sorted(names, key=lambda n: -r.answers[f"t_{n}"].noul)
         keep = ranked[: max(1, self.max_tools - len(CORE_TOOLS))]
         pre["tool_relevance"] = {n: round(r.answers[f"t_{n}"].noul, 3) for n in ranked}
@@ -439,13 +452,21 @@ class Prophet:
         history = history or []
         self._emit({"type": "turn.start", "request": request, "plan_mode": self.plan_mode, "permission_mode": self.permission_mode, "effort": effort})
         files = self.ws.listing()["entries"]
-        pre_resp = self.s1.answer({"state": {"request": request, "workspace_files": files[:60], "recent_turns": history[-4:]},
-                                   "questions": PROPHET_TURN})
-        pre = {k: v.model_dump(exclude={"legend"}) for k, v in pre_resp.answers.items()}
+        # le classifieur lit ~2 k tokens par slot (4 slots sur 8 k) : on borne ce qu'on lui montre
+        recent = [{"role": m.get("role"), "content": _clip(m.get("content"), 400)} for m in history[-4:]]
+        s1_ms = 0.0
+        try:
+            pre_resp = self.s1.answer({"state": {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent},
+                                       "questions": PROPHET_TURN})
+            pre = {k: v.model_dump(exclude={"legend"}) for k, v in pre_resp.answers.items()}
+            s1_ms = pre_resp.latency_ms
+        except Exception as e:   # le clone accelere et protege, il n'est jamais un point de panne : Bonsai continue seul
+            pre = {"direct": {"noul": 0.0}, "clarify": {"noul": 0.0}, "needs_reasoning": {"noul": 1.0}, "risk": {"score": 1.0},
+                   "s1_error": str(e)[:200]}
         budget, risk_level = self._budget(pre, effort)
         direct = (pre["direct"]["noul"] >= 0.8 and pre["needs_reasoning"]["noul"] < 0.5 and risk_level == 0 and effort != "deep"
                   and not self.plan_mode)
-        self._emit({"type": "s1.decision", "pre": pre, "latency_ms": pre_resp.latency_ms, "budget": budget, "risk_level": risk_level,
+        self._emit({"type": "s1.decision", "pre": pre, "latency_ms": s1_ms, "budget": budget, "risk_level": risk_level,
                     "path": "direct" if direct else "agent"})
         memory = self.ws.memory()
         system = SYSTEM_PROMPT.format(workspace=self.ws.root, platform=f"{platform.system()} {platform.release()}", shell=SHELL_NAME,
@@ -453,7 +474,7 @@ class Prophet:
         if self.plan_mode:
             system += PLAN_MODE_NOTE
         calls: list[dict] = []
-        stats: dict = {"s1_ms": pre_resp.latency_ms, "llm_calls": 0, "tokens": 0, "tok_s": None, "prompt_ms": 0.0}
+        stats: dict = {"s1_ms": s1_ms, "llm_calls": 0, "tokens": 0, "tok_s": None, "prompt_ms": 0.0}
 
         def track(evt: dict) -> None:
             if evt.get("type") == "llm.end":
@@ -498,9 +519,12 @@ class Prophet:
             turn = Turn(request, pre, "agent", summary or (res.content or "").strip() or "(no summary)", tool_calls=calls, tools_exposed=exposed,
                         stopped_by=res.stopped_by)
         if turn.stopped_by != "cancelled":
-            v = self.s1.answer({"state": {"request": request, "response": turn.response, "files": self.ws.listing()["entries"][:60]},
-                                "questions": {"ok": {"type": "noul", "instructions": "Does the response (and the workspace state) satisfy the user's request?"}}})
-            turn.verification = round(v.answers["ok"].noul, 3)
+            try:
+                v = self.s1.answer({"state": {"request": _clip(request, 1500), "response": _clip(turn.response, 2500), "files": self.ws.listing()["entries"][:60]},
+                                    "questions": {"ok": {"type": "noul", "instructions": "Does the response (and the workspace state) satisfy the user's request?"}}})
+                turn.verification = round(v.answers["ok"].noul, 3)
+            except Exception:
+                turn.verification = None
         turn.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         turn.stats = stats
         self._emit({"type": "turn.end", "path": turn.path, "response": turn.response, "verification": turn.verification,

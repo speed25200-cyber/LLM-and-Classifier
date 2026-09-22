@@ -137,3 +137,20 @@ def test_workspace_preview_is_in_the_user_message_not_the_system_prompt(fake_url
     Prophet(s1, s2, ws).handle("Ajoute un test a mon projet")
     system, user = s2.calls[0][0][0]["content"], s2.calls[0][0][-1]["content"]
     assert "(Workspace: src/, src/app.py)" in user and "src/app.py" not in system
+
+
+def test_agent_survives_a_classifier_outage(tmp_path):
+    """System One en panne : le tour se termine avec Bonsai seul, les actions risquees demandent confirmation."""
+    from tests.conftest import MockS2
+
+    class DownS1:
+        def answer(self, req):
+            raise ConnectionError("classifieur injoignable")
+    events, asked = [], []
+    s2 = MockS2([{"content": "", "tool_calls": [MockS2.tool_call("run_command", {"command": "echo hi"})]},
+                 {"content": "", "tool_calls": [MockS2.tool_call("done", {"summary": "fait"}, "c2")]}])
+    t = Prophet(DownS1(), s2, Workspace(tmp_path / "ws"), on_event=events.append, confirm=lambda d, j: asked.append(j) or True).handle("dis bonjour")
+    assert t.response == "fait" and t.verification is None
+    dec = next(e for e in events if e["type"] == "s1.decision")
+    assert dec["pre"]["s1_error"] and dec["path"] == "agent"
+    assert asked and asked[0]["tool_risk"] == "unknown" and asked[0]["s1_error"]

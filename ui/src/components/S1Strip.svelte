@@ -14,6 +14,9 @@
 </script>
 
 <div class="s1">
+  {#if pre.s1_error}
+    <div class="row"><span class="chip warn"><Zap size={12} /> classifieur indisponible : Bonsai continue seul, chaque action risquee est confirmee</span></div>
+  {:else}
   <button class="row" onclick={() => (open = !open)} aria-expanded={open}>
     <span class="chip s1 lead"><Zap size={12} /> System One · {num(s1.latency_ms ?? 0)} ms</span>
     {#if s1.path}
@@ -49,6 +52,7 @@
         </div>
       {/if}
     </div>
+  {/if}
   {/if}
 </div>
 
