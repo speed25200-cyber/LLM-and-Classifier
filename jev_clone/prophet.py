@@ -59,7 +59,7 @@ Guidelines:
 {memory}"""
 
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
-MUTATING_TOOLS = ("write_file", "edit_file", "run_command", "python", "create_tool", "browse")
+MUTATING_TOOLS = ("write_file", "edit_file", "run_command", "python", "create_tool", "browse", "desktop")
 PERMISSION_MODES = ("smart", "ask", "auto")   # smart : le clone decide quand demander ; ask : toujours ; auto : jamais
 EFFORTS = ("auto", "fast", "deep")            # auto : budget de reflexion choisi par le clone
 PLAN_MODE_NOTE = ("\nPLAN MODE is ON: do not modify files or run commands. Investigate with read-only tools "
@@ -259,7 +259,7 @@ class Prophet:
                  budgets: tuple[int, ...] = (0, 512, 2048, 6144), command_timeout: int = 180, max_tools: int = 12,
                  browser_factory: Callable | None = None, on_event: Callable[[dict], None] | None = None,
                  should_stop: Callable[[], bool] | None = None, permission_mode: str = "smart", plan_mode: bool = False,
-                 max_context_chars: int | None = None, max_tokens: int = 4096):
+                 max_context_chars: int | None = None, max_tokens: int = 4096, desktop_factory: Callable | None = None):
         self.s1, self.s2, self.ws = s1_engine, s2_backend, workspace
         self.confirm = confirm or (lambda cmd, judged: False)
         self.ledger = Path(ledger) if ledger else workspace.meta / "ledger.jsonl"
@@ -272,6 +272,7 @@ class Prophet:
             raise ValueError(f"permission_mode doit etre dans {PERMISSION_MODES}")
         self.permission_mode, self.plan_mode = permission_mode, plan_mode
         self.max_context_chars, self.max_tokens = max_context_chars, max_tokens
+        self.desktop_factory = desktop_factory
 
     def _emit(self, evt: dict) -> None:
         if self.on_event is not None:
@@ -364,6 +365,11 @@ class Prophet:
                 return {"ok": False, "blocked": True, "reason": "plan mode: browsing that fills forms is not allowed"}
             calls.append({"tool": "browse", "goal": a["goal"]})
             return self.browser_factory()(a["goal"], a.get("url"), a.get("slots") or {})
+        def desktop(a):
+            goal, app = a["goal"], a.get("app")
+            return self._guarded(request, calls, "desktop", f"control the computer desktop: {goal}" + (f" (open {app})" if app else ""),
+                                 lambda: self.desktop_factory()(goal, app, a.get("slots") or {}), {"goal": goal},
+                                 preview={"command": f"bureau : {goal}" + (f" · ouvre {app}" if app else "")})
         def remember(a):
             calls.append({"tool": "remember"}); return ws.remember(a["note"])
         def done(a):
@@ -396,6 +402,10 @@ class Prophet:
                                   ["name", "description", "python_body"]), create_tool),
             "done": (_tool("done", "Finish with a short summary (what exists now, how to run it, what is missing, or your one clarifying question).", {"summary": {"type": "string"}}, ["summary"]), done),
         }
+        if self.desktop_factory is not None:
+            cat["desktop"] = (_tool("desktop", "Operate desktop applications like a person (click buttons, fill fields, shortcuts, open apps) to reach a goal. "
+                                    "Optionally give the app to open first and slot values to type.",
+                                    {"goal": {"type": "string"}, "app": {"type": "string"}, "slots": {"type": "object"}}, ["goal"]), desktop)
         cat.update(ws.load_skills())
         return cat
 

@@ -55,13 +55,19 @@ class Studio:
         self.sessions = SessionStore(paths.sessions)
         self.agent = AgentService(self.sessions, self.bus.publish, urls=lambda: (self.runtime.s1_url, self.runtime.s2.url),
                                   settings=self.settings.get, ctx=lambda: self.runtime.plan.s2.ctx if self.runtime.plan else 8192,
-                                  calibration=str(paths.runs / "calibration.json") if (paths.runs / "calibration.json").exists() else None)
+                                  calibration=str(paths.runs / "calibration.json") if (paths.runs / "calibration.json").exists() else None,
+                                  desktop_backend=self._demo_desktop if demo else None)
         self.voice = VoiceService(self.installer.voice_files, self.settings.get, threads=max(1, min(4, self.hw.cpu_cores // 2)))
         self.monitor = hwmod.GpuMonitor()
         self.last_bench: dict | None = None
         self.started = time.time()
         if demo:
             self._prepare_demo()
+
+    @staticmethod
+    def _demo_desktop():
+        from jev_clone.desktop_use import SimulatedDesktop
+        return SimulatedDesktop()
 
     # ---- demo : faux serveurs lances par le vrai superviseur ------------------------------------------------------------
     def _prepare_demo(self) -> None:
@@ -118,7 +124,9 @@ class Studio:
 
     def state(self) -> dict:
         plan = self.plan()
+        from jev_clone.desktop_use import desktop_available
         return {"version": __version__, "demo": self.demo, "hardware": self.hw.to_dict(), "settings": self.settings.get().model_dump(),
+                "desktop": dict(zip(("available", "reason"), (True, "bureau simule (demo)") if self.demo else desktop_available())),
                 "plan": plan.to_dict(), "runtime": self.runtime.public(), "installed": self.installer.status(),
                 "downloads": self.downloader.snapshot(), "voice": self.voice.status(), "sessions": self.sessions.list(),
                 "permissions": self.agent.pending_permissions(), "running": list(self.agent.running), "recommended": self.recommended(),

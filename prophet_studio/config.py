@@ -75,6 +75,7 @@ class Settings(BaseModel):
     s2_port: int = 7880
     s1_port: int = 7881
     browser_tool: bool = False
+    desktop_tool: bool = False                        # computer use sur le bureau (Windows UI Automation)
     orca_lora: bool = False
     onboarding_done: bool = False
     voice: VoiceSettings = Field(default_factory=VoiceSettings)

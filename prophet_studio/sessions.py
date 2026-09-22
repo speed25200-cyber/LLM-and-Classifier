@@ -15,6 +15,7 @@ from typing import Callable
 
 from jev_clone.backend_llamacpp import LlamaCppBackend
 from jev_clone.engine import SystemOneEngine
+from jev_clone.desktop_use import make_desktop_factory
 from jev_clone.prophet import Prophet, Workspace, make_browser_factory
 from jev_clone.readout import Calibration
 
@@ -123,7 +124,8 @@ class PendingPermission:
 
 class AgentService:
     def __init__(self, store: SessionStore, publish: Callable[[dict], None], urls: Callable[[], tuple[str, str]],
-                 settings: Callable, ctx: Callable[[], int], calibration: str | None = None, runs_dir: Path | None = None):
+                 settings: Callable, ctx: Callable[[], int], calibration: str | None = None, runs_dir: Path | None = None,
+                 desktop_backend: Callable | None = None):
         self.store, self.publish, self.urls, self.settings, self.ctx = store, publish, urls, settings, ctx
         self.calibration = calibration
         self.running: dict[str, dict] = {}           # session_id -> {"turn_id", "cancel": Event, "thread"}
@@ -131,6 +133,7 @@ class AgentService:
         self._engines: tuple | None = None
         self._lock = threading.Lock()
         self.runs_dir = runs_dir
+        self.desktop_backend = desktop_backend   # None = Windows UI Automation ; la demo passe un bureau simule
 
     def engines(self) -> tuple[SystemOneEngine, LlamaCppBackend]:
         s1_url, s2_url = self.urls()
@@ -191,7 +194,8 @@ class AgentService:
                 prophet = Prophet(s1, s2, ws, confirm=confirm, max_turns=24, on_event=emit, should_stop=cancel.is_set,
                                   permission_mode=pm, plan_mode=plan_mode, max_context_chars=int(ctx * 3.2 * 0.7),
                                   max_tokens=max(1024, min(8192, ctx // 3)),
-                                  browser_factory=make_browser_factory(s1, s2) if st.browser_tool else None)
+                                  browser_factory=make_browser_factory(s1, s2) if st.browser_tool else None,
+                                  desktop_factory=make_desktop_factory(s1, s2, self.desktop_backend) if st.desktop_tool else None)
                 turn = prophet.handle(text, session["history"], effort=eff)
                 session["history"] += [{"role": "user", "content": text}, {"role": "assistant", "content": turn.response}]
             except Exception as e:

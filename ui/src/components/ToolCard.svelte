@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, ChevronRight, CircleAlert, FileCode2, FilePen, FilePlus2, FileSearch, FolderTree, Globe, Hammer, NotebookPen, Search, SquareTerminal, Zap, Code2 } from "@lucide/svelte";
+  import { Check, ChevronRight, CircleAlert, FileCode2, FilePen, FilePlus2, FileSearch, FolderTree, Globe, Hammer, NotebookPen, Search, SquareTerminal, Zap, Code2, Monitor } from "@lucide/svelte";
   import type { Block } from "../lib/types";
   import { app } from "../lib/store.svelte";
   import { highlight, langFromPath } from "../lib/markdown";
@@ -22,6 +22,7 @@
     browse: { verb: "Navigue", icon: Globe, open: true },
     remember: { verb: "Memorise", icon: NotebookPen },
     create_tool: { verb: "Cree l'outil", icon: Hammer, open: true },
+    desktop: { verb: "Pilote le bureau", icon: Monitor, open: true },
   };
   const meta = $derived(META[b.name] ?? (b.name.startsWith("judge_") ? { verb: "Juge", icon: Zap, open: true } : { verb: b.name, icon: Hammer }));
   const a = $derived(b.args as Record<string, any>);
@@ -100,6 +101,10 @@
         </div>
       {:else if b.name === "create_tool"}
         <pre class="code mono">{@html highlight(a.python_body ?? "", "python")}</pre>
+      {:else if b.name === "desktop"}
+        <div class="note">
+          {r.window ?? ""} <span class="faint">{r.app ?? ""}</span> · {r.steps ?? 0} pas{r.fast_steps != null ? ` dont ${r.fast_steps} decides par le classifieur` : ""} · {r.status ?? ""}
+        </div>
       {:else if b.name === "browse"}
         <div class="note">{r.title ?? ""} <span class="faint">{r.url ?? ""}</span> · {r.steps ?? 0} pas · {r.status ?? ""}</div>
       {:else}

@@ -17,7 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 serve = ["fastapi>=0.110", "uvicorn>=0.27"]
-studio = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "websockets>=12", "psutil>=5.9", "nvidia-ml-py>=12.535", "sherpa-onnx>=1.12"]
+studio = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "websockets>=12", "psutil>=5.9", "nvidia-ml-py>=12.535", "sherpa-onnx>=1.12",
+          "uiautomation>=2.0; sys_platform == 'win32'", "mss>=9; sys_platform == 'win32'", "pillow>=10; sys_platform == 'win32'"]
 torch = ["torch>=2.3", "transformers>=4.57", "peft>=0.13"]
 train = ["torch>=2.3", "transformers>=4.57", "peft>=0.13", "datasets>=2.19", "accelerate>=0.30", "bitsandbytes>=0.43"]
 dev = ["pytest>=8", "httpx>=0.27", "playwright>=1.45"]

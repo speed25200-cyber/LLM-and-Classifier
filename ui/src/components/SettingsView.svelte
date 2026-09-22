@@ -60,6 +60,9 @@
       </div>
     </div>
     {@render toggle(s.browser_tool, () => set({ browser_tool: !s.browser_tool }), "Outil navigateur (computer use)", "Bonsai pilote un navigateur, le classifieur decide chaque pas (Playwright requis).")}
+    {@render toggle(s.desktop_tool, () => set({ desktop_tool: !s.desktop_tool }), "Controle du bureau (computer use)",
+      app.core!.desktop?.available ? "Prophet pilote vos applications (clics, saisie, raccourcis) ; le classifieur decide chaque pas, chaque action est jugee avant execution."
+        : `Indisponible ici : ${app.core!.desktop?.reason ?? ""}`)}
   </section>
 
   <section class="card rise">

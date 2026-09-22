@@ -146,6 +146,7 @@ export interface Settings {
   s2_port: number;
   s1_port: number;
   browser_tool: boolean;
+  desktop_tool: boolean;
   orca_lora: boolean;
   onboarding_done: boolean;
   voice: VoiceSettings;
@@ -296,6 +297,7 @@ export interface CoreState {
   catalog: { models: ModelSpec[]; voice: VoiceSpec[] };
   bench: Bench | null;
   data_dir: string;
+  desktop?: { available: boolean; reason: string };
 }
 
 export interface VoiceRoute {
