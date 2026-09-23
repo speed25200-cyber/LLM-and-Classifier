@@ -184,8 +184,11 @@ Verifie ici (sans GPU) :
   API), bureau simule, proxies /v1 ;
 * l'interface pilotee par Chromium (Playwright) : assistant, tour d'agent, inspecteur, palette, autorisation,
   modeles, mesure, reglages, theme clair, fenetre etroite, sans erreur de console ;
+* la voix dans un vrai navigateur : micro factice de Chromium -> AudioWorklet 16 kHz -> envoi PCM -> transcription
+  (moteur factice) -> routage -> commande « nouvelle session » executee par l'interface (`tests/test_voice_e2e.py`) ;
 * la diffusion token par token (un correctif : `iter_lines` lisait par paquets de 512 octets) ;
-* 90 tests (`pytest`).
+* le classifieur en panne : le tour se termine avec Bonsai seul, actions risquees confirmees ;
+* 97 tests (`pytest`), dont deux pilotes par Chromium (tour d'agent, voix).
 
 Non verifie ici (pas de GPU ni d'acces a Hugging Face / aux releases GitHub depuis l'environnement de redaction) :
 * les debits reels sur RTX 5060 (estimations ; bouton **Mesurer** et `eval/SCOREBOARD.md` pour les remplacer) ;

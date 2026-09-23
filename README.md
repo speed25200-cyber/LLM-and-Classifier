@@ -95,7 +95,7 @@ le clone en pleine precision, puis rapatrier le GGUF et la calibration sur la 40
 | `eval/` | banc de mesure : les 60 cas et les sorties reelles de Jev (jev-benchmark) mesures avec le meme code que le clone ; MMLU-1200 |
 | `jev_clone/conformal.py` | ensembles de prediction conformes (couverture garantie) et porte a risque controle |
 | `jev_clone/engine_torch.py` | moteur en passe unique (toutes les questions en un forward), cible < 50 ms |
-| `tests/` | 94 tests (hors ligne, faux llama-server, Studio de bout en bout, voix, bureau, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
+| `tests/` | 97 tests (hors ligne, faux llama-server, Studio de bout en bout, interface et voix pilotees par Chromium, bureau, navigateur Playwright, banc Jev, conforme, integration contre un `llama-server` reel) |
 
 ## Ce qui est verifie / ce qui ne l'est pas
 * Verifie ici : le paquet `jev_clone` (tests unitaires), l'agent navigateur sur une page locale (Playwright), la lecture par grammaire et le cache de prefixe
