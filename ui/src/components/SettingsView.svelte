@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "../lib/store.svelte";
   import { toggleHandsfree } from "../lib/voice";
+  import { fixed } from "../lib/format";
   import type { Settings } from "../lib/types";
 
   let { onTheme, theme }: { onTheme: () => void; theme: string } = $props();
@@ -63,13 +64,15 @@
         {#each [["auto", "Auto"], ["fast", "Rapide"], ["deep", "Profond"]] as [k, l] (k)}<button class:on={s.effort === k} onclick={() => set({ effort: k })}>{l}</button>{/each}
       </div>
     </div>
-    <!-- indisponible : on ne peut pas activer (mais on peut toujours desactiver un reglage deja actif) -->
+    <!-- indisponible : on ne peut pas activer (mais on peut toujours desactiver un reglage deja actif, jamais propose a Bonsai) -->
     {@render toggle(s.browser_tool, () => set({ browser_tool: !s.browser_tool }), "Outil navigateur (computer use)",
       browserOk ? `Prophet pilote un navigateur : le classifieur decide les pas simples, Bonsai reprend en cas de doute. ${STEP_NOTE}`
-        : `Indisponible ici : ${app.core!.browser?.reason ?? "Playwright et Chromium requis"}`, !browserOk && !s.browser_tool)}
+        : `${s.browser_tool ? "Active mais indisponible ici, donc non propose a Bonsai" : "Indisponible ici"} : ${app.core!.browser?.reason ?? "Playwright et Chromium requis"}`,
+      !browserOk && !s.browser_tool)}
     {@render toggle(s.desktop_tool, () => set({ desktop_tool: !s.desktop_tool }), "Controle du bureau (computer use)",
       desktopOk ? `Prophet pilote vos applications (clics, saisie, raccourcis) : le classifieur decide les pas simples, Bonsai reprend en cas de doute. ${STEP_NOTE}`
-        : `Indisponible ici : ${app.core!.desktop?.reason ?? ""}`, !desktopOk && !s.desktop_tool)}
+        : `${s.desktop_tool ? "Active mais indisponible ici, donc non propose a Bonsai" : "Indisponible ici"} : ${app.core!.desktop?.reason ?? ""}`,
+      !desktopOk && !s.desktop_tool)}
   </section>
 
   <section class="card rise">
@@ -98,7 +101,7 @@
       <input type="range" min="0.5" max="0.98" step="0.01" value={s.voice.command_threshold} onchange={(e) => setVoice({ command_threshold: num(e) })} />
     </div>
     <div class="row">
-      <div class="lab"><b>Debit de la voix · {s.voice.speed.toFixed(2)}x</b><span></span></div>
+      <div class="lab"><b>Debit de la voix · {fixed(s.voice.speed, 2)}x</b><span></span></div>
       <input type="range" min="0.7" max="1.6" step="0.05" value={s.voice.speed} onchange={(e) => setVoice({ speed: num(e) })} />
     </div>
   </section>

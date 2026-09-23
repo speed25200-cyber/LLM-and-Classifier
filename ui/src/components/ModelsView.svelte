@@ -23,6 +23,9 @@
       { what: "Classifieur", want: c.settings.s1_model, got: plan.s1?.model_id ?? "" },
     ].filter((o) => o.want && o.want !== "auto" && o.want !== o.got),
   );
+  // plan CPU qui ne tient pas en RAM (poids + KV > 85 % de la RAM) : jamais lance sans un accord explicite
+  const ramShort = $derived(plan.backend === "cpu" && plan.rung === 0 && !plan.fits);
+  const RAM_TITLE = "RAM insuffisante pour ce plan : voir l'avertissement de la configuration";
   const s1Installed = $derived(c.catalog.models.filter((m) => m.role === "s1" && c.installed.models[m.id]?.installed));
   const missingCustom = $derived(Object.entries(c.installed.models).filter(([, v]) => v.custom && !v.installed));
   let logs = $state<{ name: string; lines: string[] } | null>(null);
@@ -63,6 +66,20 @@
   }
   async function doImportCalibration() {
     if (await app.importCalibration(calPath.trim(), calTarget)) calPath = "";
+  }
+  /** Retire un modele ; s'il etait choisi dans les reglages, le choix revient a l'automatique (sinon avertissement permanent). */
+  async function removeModel(id: string) {
+    const s = c.settings;
+    try {
+      await app.removeInstalled(id);
+    } catch (e) {
+      app.toast("error", "Retrait impossible", String(e));
+      return;
+    }
+    const patch: Record<string, string> = {};
+    if (s.s2_model === id) patch.s2_model = "auto";
+    if (s.s1_model === id) patch.s1_model = "auto";
+    if (Object.keys(patch).length) await app.updateSettings(patch);
   }
   const SERVERS = [
     { key: "s2" as const, label: "System Two · Bonsai", Icon: Brain },
@@ -128,10 +145,24 @@
         <div><span class="faint">Classifieur</span><b>{plan.s1?.device === "gpu" ? "GPU" : "CPU"}</b></div>
       </div>
       {#each unapplied as o (o.what)}
-        <div class="warnbox"><TriangleAlert size={14} /> {o.what} choisi « {o.want} » non applique : le plan utilise {o.got || "aucun modele"} (voir les notes).</div>
+        <div class="warnbox">
+          <TriangleAlert size={14} />
+          <span class="wtxt">{o.what} choisi « {o.want} » non applique : le plan utilise {o.got || "aucun modele"} (voir les notes).</span>
+          <button class="btn sm ghost" onclick={() => app.updateSettings(o.what === "Cerveau" ? { s2_model: "auto" } : { s1_model: "auto" })}>Revenir au choix automatique</button>
+        </div>
       {/each}
+      {#if ramShort}
+        <div class="warnbox ram">
+          <TriangleAlert size={14} />
+          <span class="wtxt">
+            RAM insuffisante : ce plan demande ~{mibToGib(plan.budget.ram_needed_mib ?? 0)} pour {mibToGib(plan.budget.ram_total_mib ?? 0)} de RAM
+            (limite 85 %). Chargement tres lent (disque) ou echec : choisissez un modele plus petit.
+          </span>
+          <button class="btn sm danger" onclick={() => app.startRuntime()}>Lancer quand meme</button>
+        </div>
+      {/if}
       <ul class="notes">{#each plan.notes as n}<li>{n}</li>{/each}</ul>
-      {#if replanNeeded}
+      {#if replanNeeded && !ramShort}
         <button class="btn accent" onclick={() => app.startRuntime()}><RotateCw size={15} /> Appliquer et redemarrer</button>
       {/if}
     </section>
@@ -143,10 +174,12 @@
       <div class="acts">
         {#if c.runtime.state === "ready" || c.runtime.state === "degraded"}
           <button class="btn sm" onclick={() => app.runBench()} disabled={app.benchRunning}>{#if app.benchRunning}<span class="spinner"></span>{:else}<Gauge size={14} />{/if} Mesurer</button>
-          <button class="btn sm" onclick={() => app.startRuntime()}><RotateCw size={14} /> Redemarrer</button>
+          <button class="btn sm" onclick={() => app.startRuntime()} disabled={ramShort} title={ramShort ? RAM_TITLE : undefined}><RotateCw size={14} /> Redemarrer</button>
           <button class="btn sm ghost" onclick={() => app.stopRuntime()}><Power size={14} /> Arreter</button>
         {:else}
-          <button class="btn sm accent" onclick={() => app.startRuntime()} disabled={c.runtime.state === "starting"}><Play size={14} /> Demarrer</button>
+          <button class="btn sm accent" onclick={() => app.startRuntime()} disabled={c.runtime.state === "starting" || ramShort} title={ramShort ? RAM_TITLE : undefined}>
+            <Play size={14} /> Demarrer
+          </button>
         {/if}
       </div>
     </div>
@@ -171,7 +204,15 @@
       <div class="bench tabnum">
         <span class="chip s2"><Brain size={12} /> {num(c.bench.s2_tok_s, 1)} tok/s</span>
         <span class="chip">prefill {num(c.bench.s2_prefill_tok_s)} tok/s</span>
-        <span class="chip s1"><Zap size={12} /> decision p50 {num(c.bench.s1_p50_ms, 1)} ms · p95 {num(c.bench.s1_p95_ms, 1)} ms</span>
+        <span class="chip s1" title={c.bench.s1_series?.s1_p50_ms ?? ""}><Zap size={12} /> decision p50 {num(c.bench.s1_p50_ms, 1)} ms · p95 {num(c.bench.s1_p95_ms, 1)} ms</span>
+        {#if c.bench.s1_cold_p50_ms != null}
+          <span class="chip s1" title={c.bench.s1_series?.s1_cold ?? ""}>
+            etat neuf p50 {num(c.bench.s1_cold_p50_ms, 1)} ms · p95 {num(c.bench.s1_cold_p95_ms ?? 0, 1)} ms{c.bench.s1_cold_prefill_tokens ? ` · ${num(c.bench.s1_cold_prefill_tokens)} tokens` : ""}
+          </span>
+        {/if}
+        {#if c.bench.s1_warm_p50_ms != null}
+          <span class="chip s1" title={c.bench.s1_series?.s1_warm ?? ""}>relu p50 {num(c.bench.s1_warm_p50_ms, 1)} ms · p95 {num(c.bench.s1_warm_p95_ms ?? 0, 1)} ms</span>
+        {/if}
         {#if c.bench.demo}<span class="chip warn">faux serveurs (demo)</span>{/if}
       </div>
     {/if}
@@ -218,7 +259,7 @@
               {#if !active && (role === "s2" ? c.settings.s2_model : c.settings.s1_model) === m.id}
                 <span class="chip" title="Choisi dans les reglages : applique au prochain demarrage des modeles">choisi</span>
               {:else if !active}<button class="btn sm ghost" onclick={() => app.updateSettings(role === "s2" ? { s2_model: m.id } : { s1_model: m.id })}>Utiliser</button>{/if}
-              <button class="icon-btn" title={m.custom ? "Retirer de la liste (le fichier GGUF est conserve)" : "Supprimer"} onclick={() => app.removeInstalled(m.id)}><Trash2 size={14} /></button>
+              <button class="icon-btn" title={m.custom ? "Retirer de la liste (le fichier GGUF est conserve)" : "Supprimer"} onclick={() => removeModel(m.id)}><Trash2 size={14} /></button>
             {:else if !jobs(m.id).length}
               <button class="btn sm" onclick={() => app.install([m.id])}><Download size={14} /> Installer</button>
             {/if}
@@ -264,8 +305,11 @@
           <button class="btn" onclick={doImport} disabled={!importPath.trim()}><Upload size={14} /> Importer</button>
         </div>
         {#each missingCustom as [id, v] (id)}
-          <div class="warnbox"><TriangleAlert size={14} /> GGUF importe introuvable ({id}) : <span class="mono">{v.path}</span>
-            <button class="icon-btn" title="Retirer" onclick={() => app.removeInstalled(id)}><Trash2 size={13} /></button></div>
+          <div class="warnbox">
+            <TriangleAlert size={14} />
+            <span class="wtxt">GGUF importe introuvable ({id}) : <span class="mono">{v.path}</span></span>
+            <button class="icon-btn" title="Retirer" onclick={() => removeModel(id)}><Trash2 size={13} /></button>
+          </div>
         {/each}
         <p class="faint cal">Importer une calibration (calibration.json du notebook ou d'une autre machine) pour un classifieur :</p>
         <div class="row">
@@ -294,6 +338,11 @@
   .gpu p { margin: 3px 0 0; font-size: 12.5px; }
   .badges { display: flex; flex-wrap: wrap; gap: 6px; }
   .warnbox { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 12.5px; line-height: 1.45; }
+  .warnbox > :global(svg), .warnbox > button { flex: none; }
+  .warnbox > :global(svg) { margin-top: 2px; }
+  .warnbox > .btn { margin: -3px 0; }
+  .wtxt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .warnbox.ram { background: var(--err-soft); color: var(--err); }
   .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 16px 0 10px; }
   .kpis > div { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
   .kpis span { font-size: 11.5px; }

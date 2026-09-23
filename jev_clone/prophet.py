@@ -1165,10 +1165,11 @@ class Prophet:
 
 def make_browser_factory(s1_engine, s2_backend, headless: bool = True, confirm: Callable[[str, dict], bool] | None = None,
                          on_event: Callable[[dict], None] | None = None, should_stop: Callable[[], bool] | None = None,
-                         ledger: str | Path | None = "runs/trajectories.jsonl", max_steps: int = 20):
+                         ledger: str | Path | None = "runs/trajectories.jsonl", max_steps: int = 20, max_tokens: int = 2048):
     """Fabrique l'outil `browse` : agent navigateur a deux vitesses (computer_use) partageant les deux modeles.
     confirm : autorisation des pas risques (sans elle, ils sont refuses) ; on_event / should_stop : progression par pas et
-    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py)."""
+    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py) ;
+    max_tokens : generation de Bonsai par tour (sa reflexion en prend au plus 60 %, comme dans Prophet)."""
     def factory():
         from jev_clone.computer_use import BrowserSession, ComputerUseAgent, FastPolicy, SlowPolicy, browser_available, run_result
         def run(goal, url=None, slots=None):
@@ -1177,7 +1178,8 @@ def make_browser_factory(s1_engine, s2_backend, headless: bool = True, confirm: 
                 return {"ok": False, "error": f"browser unavailable: {why}"}
             session = BrowserSession(headless=headless)
             try:
-                agent = ComputerUseAgent(session, FastPolicy(s1_engine), SlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine)), max_steps=max_steps,
+                slow = SlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine), max_tokens=max_tokens)
+                agent = ComputerUseAgent(session, FastPolicy(s1_engine), slow, max_steps=max_steps,
                                          ledger=ledger, confirm=confirm, on_event=on_event, should_stop=should_stop, kind="browse")
                 out = agent.run(goal, url=url, slots=slots or {})
                 final = session.observe()

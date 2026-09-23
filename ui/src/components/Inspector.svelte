@@ -169,12 +169,13 @@
   .no { text-align: right; padding-right: 12px; color: var(--text-4); user-select: none; }
   .c { white-space: pre; padding-right: 16px; }
   .pad { padding: 10px 14px; }
-  .grants { border-top: 1px solid var(--line); padding: 6px 6px 6px 14px; max-height: 160px; overflow-y: auto; }
+  /* hauteur propre (jusqu'a 160 px) : c'est l'apercu du fichier qui cede la place, jamais la liste des autorisations */
+  .grants { flex: none; border-top: 1px solid var(--line); padding: 6px 6px 6px 14px; max-height: 160px; overflow-y: auto; }
   .gh { display: flex; align-items: center; justify-content: space-between; min-height: 26px; }
   .gh .panel-title { display: inline-flex; align-items: center; gap: 6px; }
   .grant { display: flex; align-items: center; gap: 6px; height: 27px; font-size: 12px; color: var(--text-2); }
   .gl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .grant.inert .gl { color: var(--text-4); text-decoration: line-through; }
   .grant .icon-btn { width: 24px; height: 24px; }
-  .foot { font-size: 10.5px; padding: 6px 14px; border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .foot { flex: none; font-size: 10.5px; padding: 6px 14px; border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

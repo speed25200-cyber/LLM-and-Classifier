@@ -76,6 +76,51 @@ def _top2(probs) -> tuple[float, float]:
     return top[0], top[1]
 
 
+def _flag(v, default: bool) -> bool:
+    """Booleen d'un argument d'outil (true, "false", 0...) ; absent ou illisible -> default."""
+    if isinstance(v, (bool, int, float)):
+        return bool(v)
+    w = v.strip().lower() if isinstance(v, str) else ""
+    return True if w in ("true", "yes", "oui", "1") else False if w in ("false", "no", "non", "0") else default
+
+
+def _thinking_cap(budget: int | None, max_tokens: int, share: float = 0.6) -> int | None:
+    """La reflexion ne consomme jamais toute la generation (meme regle que Prophet._cap) : il reste de quoi agir."""
+    cap = int(max_tokens * share)
+    return budget if budget is None or 0 <= budget <= cap else cap
+
+
+class S1Meter:
+    """Temps et appels du clone pendant un run (decisions, garde-fou des pas, verifications, judge_* de Bonsai) : rendus par
+    browse / desktop (s1_ms, s1_calls) pour les statistiques du tour."""
+
+    def __init__(self):
+        self.ms, self.calls = 0.0, 0
+
+    def wrap(self, engine):
+        if isinstance(engine, _Metered):
+            if engine.meter is self:
+                return engine
+            engine = engine.inner
+        return _Metered(self, engine) if engine is not None else None
+
+
+class _Metered:
+    def __init__(self, meter: S1Meter, inner):
+        self.meter, self.inner = meter, inner
+
+    def answer(self, req):
+        t0 = time.perf_counter()
+        try:
+            return self.inner.answer(req)
+        finally:
+            self.meter.ms += (time.perf_counter() - t0) * 1000
+            self.meter.calls += 1
+
+    def __getattr__(self, k):
+        return getattr(self.inner, k)
+
+
 def _playwright_dirs() -> list[Path]:
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
     if env == "0":   # navigateurs installes dans le paquet lui-meme
@@ -247,6 +292,7 @@ class FastDecision:
     target_margin: float = 0.0        # ecart entre les deux meilleurs elements
     achieved: float = 0.0             # noul "objectif deja atteint ?"
     why: str = ""                     # raisons de l'escalade (vide = voie rapide)
+    slot_margin: float = 0.0          # ecart entre les deux meilleurs slots
 
 
 class FastPolicy:
@@ -256,10 +302,11 @@ class FastPolicy:
     confirme par le noul `achieved`, sinon Bonsai reprend la main."""
 
     def __init__(self, engine, action_threshold: float = 0.5, action_margin: float = 0.2, target_threshold: float = 0.5,
-                 target_margin: float = 0.15, done_threshold: float = 0.6, max_candidates: int = 24):
+                 target_margin: float = 0.15, done_threshold: float = 0.6, max_candidates: int = 24, slot_margin: float = 0.2):
         self.engine = engine
         self.action_threshold, self.action_margin = action_threshold, action_margin
         self.target_threshold, self.target_margin = target_threshold, target_margin
+        self.slot_margin = slot_margin
         self.done_threshold = done_threshold
         self.max_candidates = max_candidates
 
@@ -294,10 +341,11 @@ class FastPolicy:
         ranked = sorted(((resp.answers[f"t{e.index}"].noul, e.index) for e in cands), key=lambda x: -x[0])
         best_p, best_t = ranked[0] if ranked else (0.0, None)
         t_margin = best_p - (ranked[1][0] if len(ranked) > 1 else 0.0)
-        slot, slot_p = None, 0.0
-        if slots:
+        slot, slot_p, slot_m = None, 0.0, 0.0
+        if slots:   # un 51/47 entre deux slots ne se devine pas (sinon le mot de passe part dans le champ e-mail)
             s = resp.answers["slot"]
-            slot, slot_p = s.choice, float(s.probabilities.get(s.choice, 0.0))
+            sp1, sp2 = _top2(s.probabilities.values())
+            slot, slot_p, slot_m = s.choice, float(s.probabilities.get(s.choice, 0.0)), sp1 - sp2
         achieved = resp.answers["achieved"].noul
         needs_target = a.choice in ("click", "type")
         why = []
@@ -307,15 +355,16 @@ class FastPolicy:
             why.append(f"action not decisive: {a.choice} p={p1:.2f}, margin {p1 - p2:.2f}")
         if needs_target and (best_t is None or best_p < self.target_threshold or t_margin < self.target_margin):
             why.append(f"target uncertain: {best_t} p={best_p:.2f}, margin {t_margin:.2f}")
-        if a.choice == "type" and (slot in (None, "none") or slot_p < self.action_threshold):
-            why.append(f"no confident slot to type ({slot} p={slot_p:.2f})")
+        if a.choice == "type" and (slot in (None, "none") or slot_p < self.action_threshold or slot_m < self.slot_margin):
+            why.append(f"no confident slot to type ({slot} p={slot_p:.2f}, margin {slot_m:.2f})")
         if a.choice == "done" and achieved < self.done_threshold:
             why.append(f"done not confirmed: goal achieved p={achieved:.2f}")
         return FastDecision(action=a.choice, action_conf=a.confidence, action_probs=a.probabilities,
                             target=best_t if needs_target else None, target_prob=best_p,
                             slot=slot if a.choice == "type" else None, escalate=bool(why),
                             latency_ms=resp.latency_ms, raw={k: v.model_dump() for k, v in resp.answers.items()},
-                            action_prob=p1, action_margin=p1 - p2, target_margin=t_margin, achieved=achieved, why="; ".join(why))
+                            action_prob=p1, action_margin=p1 - p2, target_margin=t_margin, achieved=achieved, why="; ".join(why),
+                            slot_margin=slot_m)
 
     def verify(self, goal: str, before: PageState, action: dict, after: PageState) -> float:
         st = {"goal": goal, "action": action, "before": {"url": before.url, "title": before.title},
@@ -376,7 +425,7 @@ class StepGuard:
             return {"allowed": True, "judged": j}
         if self.confirm is None:
             return {"allowed": False, "judged": j,
-                    "reason": "risky step refused: nobody can approve it here; find a safer way or stop with done and explain why"}
+                    "reason": "risky step refused: nobody can approve it here; find a safer way or call done with achieved=false and explain why"}
         try:
             ok = bool(self.confirm(f"{self.kind} step: {j['describe']}", {**j, "tool": f"{self.kind}_step", "preview": {"command": j["describe"]}}))
         except Exception:
@@ -386,10 +435,13 @@ class StepGuard:
 
 class SlowPolicy:
     """System Two : Bonsai planifie avec des outils d'action + les outils de jugement du clone. Quand l'agent l'attache
-    (attach), chaque clic / saisie passe par le garde-fou du pas et la boucle de Bonsai suit l'annulation."""
+    (attach), chaque clic / saisie passe par le garde-fou du pas et la boucle de Bonsai suit l'annulation (generation
+    diffusee : Stop ferme la connexion). Reflexion plafonnee a thinking_share de max_tokens. `done` dit si l'objectif est
+    atteint (achieved) : un pas refuse suivi de done n'est jamais un succes."""
 
     def __init__(self, s2_backend, session: BrowserSession, toolbox: SystemOneToolbox | None = None,
-                 thinking_budget: int = 2048, max_turns: int = 6, vision: bool = False):
+                 thinking_budget: int = 2048, max_turns: int = 6, vision: bool = False, max_tokens: int = 2048,
+                 thinking_share: float = 0.6):
         self.session = session
         self.vision = vision
         self.executed: list[dict] = []
@@ -401,7 +453,10 @@ class SlowPolicy:
         def observe(a):
             return s.observe().text()
         def done(a):
-            self.executed.append({"type": "done", "summary": a.get("summary", "")}); return {"__stop__": True, "summary": a.get("summary", "")}
+            # sans achieved explicite : atteint seulement si aucun pas de cette reprise n'a ete refuse
+            ok = _flag(a.get("achieved"), not any(x.get("blocked") for x in self.executed))
+            self.executed.append({"type": "done", "summary": a.get("summary", ""), "achieved": ok})
+            return {"__stop__": True, "summary": a.get("summary", ""), "achieved": ok}
 
         tools = {
             "click": (_tool("click", "Click the interactive element with this index (from the observed elements list).",
@@ -412,9 +467,12 @@ class SlowPolicy:
             "scroll_down": (_tool("scroll_down", "Scroll the page down.", {}, []), lambda a: self.act({"type": "scroll_down"})),
             "go_back": (_tool("go_back", "Go back to the previous page.", {}, []), lambda a: self.act({"type": "go_back"})),
             "observe": (_tool("observe", "Re-observe the page (url, title, ARIA tree, interactive elements) after your actions.", {}, []), observe),
-            "done": (_tool("done", "Declare the goal achieved (or impossible) and stop.", {"summary": {"type": "string"}}, ["summary"]), done),
+            "done": (_tool("done", "Stop. achieved=true only if the goal is visibly accomplished now; achieved=false if it is impossible "
+                                   "or a needed step was refused (say why in the summary).",
+                           {"summary": {"type": "string"}, "achieved": {"type": "boolean"}}, ["summary", "achieved"]), done),
         }
-        self.loop = AgentLoop(s2_backend, toolbox, tools, max_turns=max_turns, thinking_budget=thinking_budget)
+        self.loop = AgentLoop(s2_backend, toolbox, tools, max_turns=max_turns, max_tokens=max_tokens,
+                              thinking_budget=_thinking_cap(thinking_budget, max_tokens, thinking_share))
 
     def attach(self, guard: StepGuard | None = None, should_stop: Callable[[], bool] | None = None,
                emit: Callable[[dict], None] | None = None) -> None:
@@ -423,6 +481,14 @@ class SlowPolicy:
             self.loop.should_stop = should_stop
         if emit is not None:
             self.emit = emit
+        if (should_stop is not None or emit is not None) and self.loop.on_event is None:
+            # generation diffusee : chat() recoit should_stop et Stop ferme la connexion (llama-server s'arrete aussitot) ;
+            # du flux interne ne sort que le debut de chaque tour de Bonsai (jamais ses deltas ni ses tool.call)
+            self.loop.on_event = self._inner
+
+    def _inner(self, evt: dict) -> None:
+        if evt.get("type") == "llm.start":
+            self.emit({"type": "computer.think", "turn": evt.get("turn", 0)})
 
     def act(self, act: dict, observe: bool = False) -> dict:
         """Execute une action de Bonsai. Clic, saisie, raccourci, lancement : juges d'abord ; refus -> rien n'est execute."""
@@ -442,9 +508,9 @@ class SlowPolicy:
         self.executed, self.goal = [], goal
         content: list | str = (f"# Goal\n{goal}\n\n# Why you are called\n{why}\n\n# Slots you may type (never invent values)\n"
                                f"{json.dumps(slots)}\n\n# Recent actions\n{json.dumps(history[-6:])}\n\n# Page\n{json.dumps(state.text(), ensure_ascii=False)}\n\n"
-                               "Act with the tools (click/type/scroll_down/go_back), re-observe if needed, call done when the goal is achieved. "
-                               "Risky steps are checked first and may need the user's approval: if one is refused, find another way or call done "
-                               "and explain. You may call judge_* tools for fast checks.")
+                               "Act with the tools (click/type/scroll_down/go_back), re-observe if needed, call done with achieved=true when the "
+                               "goal is visibly achieved. Risky steps are checked first and may need the user's approval: if one is refused, find "
+                               "another way or call done with achieved=false and explain. You may call judge_* tools for fast checks.")
         if self.vision and state.screenshot_b64:
             content = [{"type": "text", "text": content},
                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{state.screenshot_b64}"}}]
@@ -458,9 +524,10 @@ class ComputerUseAgent:
 
     confirm(describe, judged) : autorisation humaine des pas risques (meme contrat que Prophet.confirm) ; sans elle, un
     pas risque est refuse et signale. on_event(evt) : un evenement `computer.step` par pas (voie rapide ou escalade,
-    probabilite, raison) et `computer.action` par action de Bonsai. should_stop() : annulation cooperative, transmise a
-    la boucle de Bonsai. Escalades plafonnees (max_escalations) ; un Bonsai en panne arrete la boucle apres
-    max_s2_errors echecs consecutifs. Une erreur du clone n'arrete jamais la tache : le pas part a Bonsai."""
+    probabilite, raison), `computer.escalate` au depart d'une escalade, `computer.think` a chaque tour de Bonsai et
+    `computer.action` par action de Bonsai. should_stop() : annulation cooperative, transmise a la boucle de Bonsai.
+    Escalades plafonnees (max_escalations) ; un Bonsai en panne (erreur, ou reponse coupee par max_tokens) arrete la
+    boucle apres max_s2_errors echecs consecutifs. Une erreur du clone n'arrete jamais la tache : le pas part a Bonsai."""
 
     def __init__(self, session: BrowserSession, fast: FastPolicy, slow: SlowPolicy | None = None,
                  max_steps: int = 30, verify: bool = True, verify_threshold: float = 0.4,
@@ -470,7 +537,14 @@ class ComputerUseAgent:
         self.session, self.fast, self.slow = session, fast, slow
         self.max_steps, self.verify, self.verify_threshold = max_steps, verify, verify_threshold
         self.ledger = Path(ledger) if ledger else None
+        # chaque lecture du clone (decision, garde-fou, verification, judge_* de Bonsai) est comptee pour le run
+        self.s1 = S1Meter()
+        fast.engine = self.s1.wrap(fast.engine)
         self.guard = StepGuard(fast.engine, confirm, kind) if guard is True else (guard or None)
+        if self.guard is not None:
+            self.guard.engine = self.s1.wrap(self.guard.engine)
+        if slow is not None and slow.loop.toolbox is not None:
+            slow.loop.toolbox.engine = self.s1.wrap(slow.loop.toolbox.engine)
         self.on_event = on_event
         self.should_stop = should_stop or (lambda: False)
         self.max_escalations, self.max_s2_errors, self.kind = max_escalations, max_s2_errors, kind
@@ -496,12 +570,18 @@ class ComputerUseAgent:
         if self.escalations >= self.max_escalations:
             return "max_escalations"
         self.escalations += 1
+        self._emit({"type": "computer.escalate", "step": rec["step"], "why": why[:200], "escalations": self.escalations,
+                    "max": self.max_escalations})
         out = self.slow.step(goal, state, history, slots, why)
         rec["slow"] = out
         history.extend(out["actions"])
-        self.s2_errors = self.s2_errors + 1 if out["stopped_by"] == "error" else 0
-        if out["stopped_by"] == "stop_tool":
-            return "done"
+        # erreur, ou reponse coupee par max_tokens sans action : un echec de Bonsai, pas une escalade de plus a bruler
+        self.s2_errors = self.s2_errors + 1 if out["stopped_by"] in ("error", "length") else 0
+        if out["stopped_by"] == "stop_tool":   # done : un succes seulement si Bonsai declare l'objectif atteint
+            d = next((a for a in reversed(out["actions"]) if a.get("type") == "done"), {})
+            if d.get("achieved", True):
+                return "done"
+            return "blocked" if any(a.get("blocked") for a in out["actions"]) else "not_achieved"
         if out["stopped_by"] == "cancelled" or self.should_stop():
             return "cancelled"
         if self.s2_errors >= self.max_s2_errors:
@@ -516,6 +596,7 @@ class ComputerUseAgent:
         records: list[dict] = []
         status, fails = "max_steps", 0
         self.escalations = self.s2_errors = 0
+        self.s1.ms, self.s1.calls = 0.0, 0
         for step in range(self.max_steps):
             if self.should_stop():
                 status = "cancelled"; break
@@ -530,8 +611,8 @@ class ComputerUseAgent:
             else:
                 why = d.why
                 rec["fast"] = {"action": d.action, "conf": d.action_conf, "p": round(d.action_prob, 4), "margin": round(d.action_margin, 4),
-                               "target": d.target, "target_prob": d.target_prob, "slot": d.slot, "achieved": d.achieved,
-                               "escalate": d.escalate, "ms": d.latency_ms}
+                               "target": d.target, "target_prob": d.target_prob, "slot": d.slot, "slot_margin": round(d.slot_margin, 4),
+                               "achieved": d.achieved, "escalate": d.escalate, "ms": d.latency_ms}
             if d is not None and not d.escalate:
                 action = {"type": d.action}
                 if d.target is not None:
@@ -581,7 +662,7 @@ class ComputerUseAgent:
         summary = next((a.get("summary") for a in reversed(history) if a.get("type") == "done"), None)
         return {"status": status, "steps": len(records), "history": history, "records": records, "escalations": self.escalations,
                 "fast_steps": sum(1 for r in records if r.get("path") == "fast"), "summary": summary,
-                "blocked": [a for a in history if a.get("blocked")]}
+                "blocked": [a for a in history if a.get("blocked")], "s1_ms": round(self.s1.ms, 1), "s1_calls": self.s1.calls}
 
     def _log(self, goal, status, records):
         if not self.ledger:
@@ -593,9 +674,10 @@ class ComputerUseAgent:
 
 
 def run_result(out: dict) -> dict:
-    """Resultat compact rendu a Bonsai par les outils browse / desktop."""
+    """Resultat compact rendu a Bonsai par les outils browse / desktop. ok : objectif atteint (jamais apres un pas refuse
+    suivi d'un done non atteint). s1_ms / s1_calls : lectures du clone pendant le run, pour les statistiques du tour."""
     r = {"ok": out["status"] == "done", "status": out["status"], "steps": out["steps"], "fast_steps": out.get("fast_steps", 0),
-         "escalations": out.get("escalations", 0)}
+         "escalations": out.get("escalations", 0), "s1_ms": float(out.get("s1_ms") or 0.0), "s1_calls": int(out.get("s1_calls") or 0)}
     if out.get("summary"):
         r["summary"] = out["summary"]
     if out.get("blocked"):
@@ -639,22 +721,30 @@ def trajectory_to_examples(traj: dict) -> list[dict]:
     """DAgger : les pas escalades (actions decidees par Bonsai) deviennent des exemples etiquetes pour la FastPolicy,
     sur l'etat que Bonsai a vu (`slow_state` quand il reprend apres une action rapide). Les pas rapides verifies avec
     succes sont gardes aussi (auto-etiquetage, poids a moderer a l'entrainement). Une action refusee par le garde-fou
-    n'est jamais une etiquette."""
+    n'est jamais une etiquette, et l'exemple d'un pas qui en contient une est marque `declined`. Un done non atteint
+    (impossible, pas refuse) s'etiquette "escalate" : jamais done / objectif atteint sur un etat inacheve."""
     out = []
     for rec in traj.get("records", []):
         if rec.get("path", "").startswith("escalated"):
-            acts = [a for a in (rec.get("slow") or {}).get("actions") or [] if not a.get("blocked")]
+            slow = (rec.get("slow") or {}).get("actions") or []
+            acts = [a for a in slow if not a.get("blocked")]
             if not acts:
                 continue
-            a = acts[0]
+            a, declined = acts[0], any(x.get("blocked") for x in slow)
             st = rec.get("slow_state") or rec["state"]
-            action, slot = (a["type"] if a["type"] in ACTIONS else "escalate"), None
+            action, slot, achieved = (a["type"] if a["type"] in ACTIONS else "escalate"), None, False
             if action == "type":
                 slot = _slot_of(str(a.get("text", "")), st.get("available_slots") or {})
                 if slot is None:   # texte libre : la politique rapide ne sait pas l'ecrire, la bonne decision est d'escalader
                     action = "escalate"
+            elif action == "done":   # anciens journaux sans "achieved" : atteint seulement si rien n'a ete refuse
+                achieved = _flag(a.get("achieved"), not declined)
+                action = "done" if achieved else "escalate"
             target = _as_int(a.get("target")) if action in ("click", "type") else None
-            out.append(decision_example(st, action, target, slot, a["type"] == "done", "bonsai"))
+            ex = decision_example(st, action, target, slot, achieved, "bonsai")
+            if declined:
+                ex["declined"] = True
+            out.append(ex)
         elif rec.get("path") == "fast" and (rec.get("verify") or 0) >= 0.8 and (rec.get("result") or {}).get("ok"):
             f = rec["fast"]
             out.append(decision_example(rec["state"], f["action"], f.get("target"), f.get("slot"), False, "self"))
