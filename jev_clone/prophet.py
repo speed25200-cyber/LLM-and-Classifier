@@ -812,9 +812,10 @@ class Prophet:
         ws = self.ws
 
         def judge_write(path: str, content: str) -> bool:
-            # smart : toute ecriture est jugee sur son contenu entier (un .txt ou un hook git peut etre lance plus tard) ;
-            # ask : l'humain voit tout, le clone juge ce qui peut s'executer (autorisation par classe de risque)
-            return self.permission_mode == "smart" or _executable(path, content)
+            # le clone juge a l'ecriture ce qui peut s'executer (suffixe, sans extension, hooks .git, #!...) ; un fichier de
+            # donnees (html, css, md, txt) n'est pas juge ici : s'il est lance plus tard, la commande montre son contenu
+            # entier au juge (_exec_context). Ecrire une app ne paie donc pas une passe S1 par page ou feuille de style.
+            return _executable(path, content)
         def meta_refused(tool: str, path: str) -> dict:   # .prophet/skills/*.py serait execute aux tours suivants
             calls.append({"tool": tool, "path": path, "ok": False, "blocked": True, "meta": True})
             return {"ok": False, "blocked": True, "error": META_REFUSAL}

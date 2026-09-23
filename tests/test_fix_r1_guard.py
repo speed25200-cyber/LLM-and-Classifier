@@ -195,8 +195,10 @@ def test_write_then_run_is_judged_in_smart_mode_whatever_the_suffix(tmp_path, de
     s2 = MockS2([{"content": "", "tool_calls": [MockS2.tool_call("write_file", {"path": fname, "content": content}, "c1"),
                                                 MockS2.tool_call("run_command", {"command": cmd}, "c2")]}, DONE])
     t = Prophet(demo_s1, s2, ws, confirm=lambda d, j: asked.append(j) or False).handle("lance le script du projet")
-    assert asked and asked[0]["tool"] == "write_file" and asked[0]["tool_risk"] == "destructive"
-    assert not (ws.root / "PWNED").exists() and t.tool_calls[0]["blocked"]
+    # un fichier executable est juge des l'ecriture ; un .txt l'est quand une commande le lance (contenu montre au juge)
+    assert asked and asked[0]["tool"] == ("run_command" if fname == "notes.txt" else "write_file")
+    assert asked[0]["tool_risk"] == "destructive" and not (ws.root / "PWNED").exists()
+    assert any(c.get("blocked") for c in t.tool_calls)
     # fichier deja la (clone d'un depot, pas ecrit par l'outil) : la commande montre son contenu au juge
     ws.write(fname, content)
     asked.clear()
@@ -213,11 +215,11 @@ def test_ask_mode_judges_every_write_that_can_run_and_edits_show_the_resulting_f
         assert not _executable(path, "hello")
     # une charge assemblee en plusieurs retouches : le juge voit le fichier qui en resulte
     ws = Workspace(tmp_path / "ws")
-    ws.write("notes.txt", "os.system('rm -@@ ~/Documents')\n")
+    ws.write("helper.py", "os.system('rm -@@ ~/Documents')\n")
     asked = []
-    Prophet(eng(), calls(("edit_file", {"path": "notes.txt", "old_string": "@@", "new_string": "rf"})), ws,
+    Prophet(eng(), calls(("edit_file", {"path": "helper.py", "old_string": "@@", "new_string": "rf"})), ws,
             confirm=lambda d, j: asked.append(j) or False).handle("corrige le fichier")
-    assert asked and asked[0]["tool_risk"] == "destructive" and "@@" in (ws.root / "notes.txt").read_text()
+    assert asked and asked[0]["tool_risk"] == "destructive" and "@@" in (ws.root / "helper.py").read_text()
 
 
 # ---- 4. un script long est juge en entier (ou arret humain), jamais rogne en silence ------------------------------------------------
