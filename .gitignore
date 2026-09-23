@@ -17,3 +17,5 @@ desktop/src-tauri/target/
 # application de bureau : sidecar uv telecharge (npm run sidecar) et schemas generes par tauri-build
 desktop/src-tauri/binaries/
 desktop/src-tauri/gen/
+# copies de travail temporaires des agents
+.claude/worktrees/
