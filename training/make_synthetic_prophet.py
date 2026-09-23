@@ -1,9 +1,9 @@
 """Jeu d'entrainement du clone pour Prophet, au format EXACT des appels de Prophet / Studio, sans aucune donnee a fournir.
 
-    # regles seules (aucun reseau) : pre-tour, pertinence des outils, verification, voix
+    # regles seules (aucun reseau) : pre-tour, garde-fou, pertinence des outils, verification, voix
     python training/make_synthetic_prophet.py --out data/prophet_train.jsonl --val data/prophet_val.jsonl \
         --calib data/prophet_calib.jsonl --n 20000
-    # + garde-fou : vos exemples risques (destructive / privileged / exfiltration, violations de politique)
+    # + vos propres exemples de garde-fou (issus de vos journaux), en plus des exemples integres
     python training/make_synthetic_prophet.py ... --guard-extra data/guard_risky.jsonl
     # + Bonsai 2 27B enseignant (S2) : distributions pour le terme KL, estimations remplacees
     python training/make_synthetic_prophet.py ... --teacher http://127.0.0.1:8080 --workers 4
@@ -15,9 +15,10 @@ verify (ok), voice (intent). Sorties : --out (entrainement), --val (gabarits jam
 tenu a l'ecart, forme d'etat de Prophet : fichier pour `python -m jev_clone.calibrate --data`, importable dans Studio).
 Les graines livrees (jev_clone/seeds) ne sont jamais mises dans l'entrainement : le bouton Calibrer de Studio les lit.
 
-Garde-fou : ce script n'ecrit que des actions benignes (lecture, ecriture dans le projet). Un garde entraine sans exemples
-risques apprendrait que tout est benin : sans --guard-extra, la famille guard est retiree (--guard-benign-only pour la
-forcer). Format de --guard-extra, une ligne par action jugee (memes questions que jev_clone.guard.JUDGE_QUESTIONS) :
+Garde-fou : actions benignes (lecture, ecriture dans le projet) et ~40 % d'exemples defensifs des classes risquees
+(prophet_templates.GUARD_RISKY : destructive, privileged, exfiltration, violations de politique, souvent derriere une demande
+anodine) : un garde qui ne voit que du benin perd le sens du danger. --guard-benign-only les retire (deconseille).
+Vos exemples s'ajoutent avec --guard-extra, une ligne par action jugee (memes questions que jev_clone.guard.JUDGE_QUESTIONS) :
     {"state": {"user_request": "...", "proposed_action": "shell: ..."},
      "labels": {"tool_risk": "destructive", "risk": 3, "policy_violation": true}}
 Sources : vos refus dans Studio (journal runs/ledger.jsonl), vos regles internes, une relecture humaine.
@@ -134,11 +135,17 @@ def main(argv=None, teacher_backend=None, expand_backend=None):
     if bad:
         ap.error(f"familles inconnues : {bad}")
     extra = load_guard_extra(args.guard_extra) if args.guard_extra else []
-    if "guard" in fams and not extra and not args.guard_benign_only:
+    if "guard" in fams and not extra and not P.T.GUARD_RISKY and not args.guard_benign_only:
         print("garde-fou : aucun exemple risque (--guard-extra) -> famille guard retiree (un garde qui ne voit que du benin "
               "perd le sens du danger) ; --guard-benign-only pour la garder", file=sys.stderr)
         fams.remove("guard")
-    rows = P.generate(args.n, args.seed, fams) if fams else []
+    saved_risky = P.T.GUARD_RISKY
+    if args.guard_benign_only:
+        P.T.GUARD_RISKY = []
+    try:
+        rows = P.generate(args.n, args.seed, fams) if fams else []
+    finally:
+        P.T.GUARD_RISKY = saved_risky
     if args.expand or expand_backend is not None:
         if expand_backend is None:
             from jev_clone.backend_llamacpp import LlamaCppBackend

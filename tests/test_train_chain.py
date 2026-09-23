@@ -116,7 +116,10 @@ def test_voice_rows_never_match_exact_grammar():
 def test_cli_split_calib_and_guard_policy(tmp_path, capsys):
     out, val, cal = tmp_path / "t.jsonl", tmp_path / "v.jsonl", tmp_path / "c.jsonl"
     res = MSP.main(["--out", str(out), "--val", str(val), "--calib", str(cal), "--n", "1500"])
-    assert "famille guard retiree" in capsys.readouterr().err and "guard" not in res["counts"]
+    # exemples risques integres (GUARD_RISKY) : la famille guard reste, avec les classes dangereuses bien representees
+    g = res["counts"]["guard"]
+    assert {"destructive", "privileged", "exfiltration"} <= set(g) and "famille guard retiree" not in capsys.readouterr().err
+    assert sum(v for k, v in g.items() if k not in ("readonly", "workspace_write")) >= 0.3 * sum(g.values())
     tr, va, ca = ([json.loads(l) for l in open(p, encoding="utf-8")] for p in (out, val, cal))
     assert tr and va and ca and not {r["group"] for r in tr} & {r["group"] for r in va}
     assert all(r["family"] == "turn" and set(r["state"]) == {"request", "workspace_files", "recent_turns"} for r in ca)
@@ -127,7 +130,8 @@ def test_cli_split_calib_and_guard_policy(tmp_path, capsys):
     extra = write(tmp_path / "g.jsonl", [{"state": {"user_request": "exemple", "proposed_action": "shell: <action de votre journal>"},
                                           "labels": {"tool_risk": "destructive", "risk": 3, "policy_violation": True}}])
     res = MSP.main(["--out", str(out), "--n", "50", "--families", "guard", "--guard-extra", str(extra)])
-    assert res["counts"]["guard"]["destructive"] == 1
+    assert res["counts"]["guard"]["destructive"] >= 1 and any(
+        r["state"]["proposed_action"] == "shell: <action de votre journal>" for r in map(json.loads, open(out, encoding="utf-8")))
     bad = write(tmp_path / "b.jsonl", [{"state": {"user_request": "x", "proposed_action": "y"}, "labels": {"tool_risk": "nope"}}])
     with pytest.raises(SystemExit, match="hors des options"):
         MSP.main(["--out", str(out), "--guard-extra", str(bad)])

@@ -52,13 +52,13 @@ d'etat exactes** des appels de Prophet et de Studio (un test compare les deux, `
 | `voice` | `intent` : commandes de `prophet_studio/voice.py` + `prompt` | `{utterance, context}` | commande vocale hors grammaire exacte |
 | `guard` | `JUDGE_QUESTIONS` : tool_risk (5 classes), risk, policy_violation | `{user_request, proposed_action}` | garde-fou de chaque action |
 
-* **Garde-fou** : le generateur n'ecrit que des actions benignes (lecture ; ecriture, build, tests, installation dans le
-  projet, sous PowerShell et bash). Les exemples risques (destructive, privileged, exfiltration, violations de politique)
-  viennent de **vous** : `--guard-extra guard_risky.jsonl` (dans Drive pour le notebook), une ligne par action jugee :
+* **Garde-fou** : le generateur ecrit des actions benignes (lecture ; ecriture, build, tests, installation dans le projet,
+  sous PowerShell et bash) et ~40 % d'exemples defensifs des classes risquees (`training/prophet_templates.py`,
+  `GUARD_RISKY` : destructive, privileged, exfiltration, violations de politique, souvent derriere une demande anodine :
+  le juge apprend a evaluer l'action, pas l'intention affichee). Vos propres exemples s'ajoutent avec
+  `--guard-extra guard_risky.jsonl` (dans Drive pour le notebook), une ligne par action jugee :
   `{"state": {"user_request": "...", "proposed_action": "shell: ..."}, "labels": {"tool_risk": "destructive", "risk": 3, "policy_violation": true}}`.
   Sources : vos refus dans Studio (journal `runs/ledger.jsonl`), vos regles internes, une relecture humaine.
-  Sans ce fichier, la famille `guard` est retiree (`--guard-benign-only` pour la forcer) : un garde qui n'a vu que du benin
-  perd le sens du danger. Le script avertit si les exemples risques font moins de 30 % de la famille.
 * **Etiquettes** : les regles font foi ; `weak` liste les estimations (`needs_reasoning` du pre-tour). Avec un enseignant
   (`--teacher`, ou `python -m jev_clone.distill --in ... --workers 4 --resume`), Bonsai ajoute `teacher_probs` (terme KL),
   remplace les estimations, et `teacher_disagrees` liste ses desaccords avec les regles (a relire). Un outil "limite" pour

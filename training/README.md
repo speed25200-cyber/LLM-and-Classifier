@@ -10,8 +10,8 @@ justesse et la calibration sur les questions "maison". Chaine complete sur A100 
 
 | Source | Script | Remarque |
 |---|---|---|
-| **Prophet, par regles** (pre-tour, outils, verification, voix, garde-fou benin) | `make_synthetic_prophet.py` (`prophet_data.py`, `prophet_templates.py`) | forme d'etat et questions exactes de Prophet / Studio ; validation par gabarits tenus a l'ecart ; `--calib` = pre-tour pour `jev_clone.calibrate` |
-| Garde-fou : **vos** exemples risques | `make_synthetic_prophet.py --guard-extra fichier.jsonl` | obligatoire pour garder la famille `guard` (format dans l'en-tete du script) |
+| **Prophet, par regles** (pre-tour, outils, verification, voix, garde-fou benin + exemples defensifs risques) | `make_synthetic_prophet.py` (`prophet_data.py`, `prophet_templates.py`) | forme d'etat et questions exactes de Prophet / Studio ; validation par gabarits tenus a l'ecart ; `--calib` = pre-tour pour `jev_clone.calibrate` |
+| Garde-fou : **vos** exemples en plus | `make_synthetic_prophet.py --guard-extra fichier.jsonl` | optionnel, s'ajoute aux exemples integres (format dans l'en-tete du script) |
 | Bonsai 2 27B enseignant | `--teacher URL`, ou `python -m jev_clone.distill --in ... --workers 4 --resume` | `teacher_probs` (KL), estimations remplacees, `teacher_disagrees` a relire |
 | Computer use de Studio (DAgger) | `make_from_trajectories.py` | pas escalades vers Bonsai = exemples etiquetes |
 | Graines etendues par Bonsai | `make_synthetic_prophet.py --expand URL --per-seed 20` | demandes nouvelles de meme nature |

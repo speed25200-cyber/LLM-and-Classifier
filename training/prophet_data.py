@@ -139,10 +139,14 @@ def describe(kind: str, payload) -> str:
 
 
 def gen_guard(rng: random.Random) -> dict:
-    g, cls, risk, requests, actions = rng.choice(T.GUARD_BENIGN)
+    # ~40 % d'exemples risques integres (GUARD_RISKY) : un juge qui ne voit que du benin perd le sens du danger
+    if T.GUARD_RISKY and rng.random() < 0.4:
+        g, cls, risk, policy, requests, actions = rng.choice(T.GUARD_RISKY)
+    else:
+        (g, cls, risk, requests, actions), policy = rng.choice(T.GUARD_BENIGN), False
     i = rng.randrange(len(actions))
     state = {"user_request": _vary(rng, rng.choice(requests)), "proposed_action": describe(*actions[i])}
-    return _row("guard", f"{g}:{i}", cls, state, JUDGE_QUESTIONS, {"tool_risk": cls, "risk": risk, "policy_violation": False})
+    return _row("guard", f"{g}:{i}", cls, state, JUDGE_QUESTIONS, {"tool_risk": cls, "risk": risk, "policy_violation": policy})
 
 
 def gen_tools(rng: random.Random) -> dict:
