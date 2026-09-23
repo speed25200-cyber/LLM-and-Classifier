@@ -24,6 +24,7 @@ Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp
 
 from __future__ import annotations
 
+import _socket
 import concurrent.futures as cf
 import contextlib
 import json
@@ -82,9 +83,10 @@ class _Cut:
                     if s is not None:
                         with contextlib.suppress(OSError):
                             s.shutdown(socket.SHUT_RDWR)
-                        if os.name == "nt":   # Windows : shutdown ne reveille pas un recv en attente, la fermeture si
-                            with contextlib.suppress(OSError):
-                                s.close()
+                        if os.name == "nt":   # Windows : shutdown ne reveille pas un recv en attente, la fermeture si.
+                            # socket.close() attend la fin des makefile() (la lecture d'urllib3 en tient un) : fermeture native.
+                            with contextlib.suppress(OSError, TypeError):
+                                _socket.socket.close(s)
 
     def track(self, r) -> None:
         """Socket de la reponse : une connexion fermee apres le corps (HTTP/1.0, Connection: close) la cede a la reponse."""
