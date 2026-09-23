@@ -31,6 +31,42 @@ def _close_thinking(blocks: list, ts: float) -> None:
         blocks[-1]["ms"] = round((ts - blocks[-1]["started"]) * 1000, 1)
 
 
+CU_KEEP = 40   # pas du computer use gardes par outil : session sauvegardee bornee
+
+
+def _cu_clip(v, n: int = 200):
+    return (v or "")[:n] or None
+
+
+def reduce_computer(blocks: list, evt: dict) -> None:
+    """Progression par pas de browse / desktop (computer.escalate, .think, .action, .step), rattachee a l'outil en cours du
+    meme nom (Prophet execute ses outils un par un) : pas (voie, action, probabilite, raison, actions de Bonsai), escalades
+    et etat en direct. Les actions de Bonsai arrivent avant le computer.step de leur pas."""
+    b = next((b for b in reversed(blocks) if b["type"] == "tool" and b.get("status") == "running" and b["name"] == evt.get("tool")), None)
+    if b is None:
+        return
+    cu = b.setdefault("cu", {"steps": [], "n": 0, "escalations": 0, "pending": [], "live": None})
+    t = evt["type"]
+    base = cu["live"] or {"kind": "", "step": cu["n"], "why": None, "turn": None, "action": None, "blocked": False}
+    if t == "computer.escalate":
+        cu["escalations"] = evt.get("escalations") or cu["escalations"]
+        cu["live"] = {"kind": "escalate", "step": evt["step"] if evt.get("step") is not None else cu["n"], "why": _cu_clip(evt.get("why")),
+                      "turn": None, "action": None, "blocked": False}
+    elif t == "computer.think":
+        cu["live"] = {**base, "kind": "think", "turn": evt.get("turn") or 0}
+    elif t == "computer.action":
+        a = {"action": evt.get("action"), "blocked": bool(evt.get("blocked")), "ok": bool(evt.get("ok"))}
+        cu["pending"].append(a)
+        cu["live"] = {**base, "kind": "action", "action": a["action"], "blocked": a["blocked"]}
+    elif t == "computer.step":
+        slow = cu["pending"] or [{"action": x, "blocked": False, "ok": None} for x in evt.get("slow_actions") or []]
+        cu["steps"] = (cu["steps"] + [{"step": evt["step"] if evt.get("step") is not None else cu["n"], "path": evt.get("path"),
+                                        "action": evt.get("action"), "p": evt.get("p"), "why": _cu_clip(evt.get("why")),
+                                        "verify": evt.get("verify"), "error": _cu_clip(evt.get("error")),
+                                        "escalations": evt.get("escalations") or 0, "slow": slow}])[-CU_KEEP:]
+        cu.update(n=cu["n"] + 1, pending=[], live=None, escalations=evt.get("escalations") or cu["escalations"])
+
+
 def reduce_event(item: dict, evt: dict) -> None:
     blocks = item.setdefault("blocks", [])
     t = evt.get("type")
@@ -71,6 +107,8 @@ def reduce_event(item: dict, evt: dict) -> None:
         item["status"] = "done"
     elif t == "turn.error":
         item["status"], item["error"] = "error", evt.get("error")
+    elif t in ("computer.escalate", "computer.think", "computer.action", "computer.step"):
+        reduce_computer(blocks, evt)
 
 
 class SessionStore:
@@ -229,14 +267,19 @@ class AgentService:
                 ws = Workspace(session.get("workspace") or st.workspace)
                 # computer use : un pas risque passe par la meme demande d'autorisation (sauf mode « jamais »), un evenement
                 # par pas, annulation par Stop, trajectoires journalisees pour re-entrainer la politique rapide (DAgger)
+                from jev_clone.computer_use import browser_available
                 from jev_clone.desktop_use import desktop_available
                 runs = self.runs_dir or self.store.root.parent / "runs"
-                cu = {"confirm": (lambda d, j: True) if pm == "auto" else confirm, "on_event": emit, "should_stop": cancel.is_set}
-                desktop_ok = st.desktop_tool and (self.desktop_backend is not None or desktop_available()[0])   # hors Windows : outil absent
+                max_tokens = max(1024, min(8192, ctx // 3))   # Bonsai des outils browse / desktop : meme generation, meme part de reflexion
+                cu = {"confirm": (lambda d, j: True) if pm == "auto" else confirm, "on_event": emit, "should_stop": cancel.is_set,
+                      "max_tokens": max_tokens}
+                # outil indisponible (sans Playwright / Chromium ; hors Windows pour le bureau) : jamais propose a Bonsai
+                browser_ok = st.browser_tool and browser_available()[0]
+                desktop_ok = st.desktop_tool and (self.desktop_backend is not None or desktop_available()[0])
                 prophet = Prophet(s1, s2, ws, confirm=confirm, max_turns=24, on_event=emit, should_stop=cancel.is_set,
                                   permission_mode=pm, plan_mode=plan_mode, max_context_chars=int(ctx * 3.2 * 0.7),
-                                  max_tokens=max(1024, min(8192, ctx // 3)),
-                                  browser_factory=make_browser_factory(s1, s2, ledger=runs / "trajectories.jsonl", **cu) if st.browser_tool else None,
+                                  max_tokens=max_tokens,
+                                  browser_factory=make_browser_factory(s1, s2, ledger=runs / "trajectories.jsonl", **cu) if browser_ok else None,
                                   desktop_factory=make_desktop_factory(s1, s2, self.desktop_backend, ledger=runs / "desktop_trajectories.jsonl", **cu)
                                   if desktop_ok else None)
                 turn = prophet.handle(text, session["history"], effort=eff)

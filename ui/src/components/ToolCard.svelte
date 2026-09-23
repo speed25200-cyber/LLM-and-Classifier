@@ -1,15 +1,14 @@
 <script lang="ts">
   import { Check, ChevronRight, CircleAlert, FileCode2, FilePen, FilePlus2, FileSearch, FolderTree, Globe, Hammer, NotebookPen, Search, SquareTerminal, Zap, Code2, Monitor } from "@lucide/svelte";
-  import type { Block } from "../lib/types";
+  import type { ComputerStep, ToolBlock } from "../lib/types";
   import { app } from "../lib/store.svelte";
   import { api } from "../lib/api";
   import { highlight, langFromPath } from "../lib/markdown";
-  import { ms, pct } from "../lib/format";
+  import { cuPath, cuStatus, ms, pct } from "../lib/format";
   import { parseUnifiedDiff } from "../lib/diff";
   import DiffView from "./DiffView.svelte";
 
-  type Tool = Extract<Block, { type: "tool" }>;
-  let { b }: { b: Tool } = $props();
+  let { b }: { b: ToolBlock } = $props();
 
   const META: Record<string, { verb: string; icon: any; open?: boolean }> = {
     write_file: { verb: "Ecrit", icon: FilePlus2, open: true },
@@ -30,8 +29,25 @@
   const target = $derived(
     a.path ?? a.command ?? a.pattern ?? a.goal ?? a.name ?? a.question ?? (b.name === "python" ? (a.code ?? "").split("\n")[0] : a.note) ?? "",
   );
+  // computer use : progression par pas (computer.*), visible pendant le run et rechargee avec la session
+  const computer = $derived(b.name === "browse" || b.name === "desktop");
+  const cu = $derived(computer ? b.cu : undefined);
+  // un pas : actions de Bonsai s'il a repris la main, sinon l'action du classifieur et sa probabilite
+  const acts = (s: ComputerStep) => s.slow.map((x) => `${x.action ?? "?"}${x.blocked ? " (refuse)" : ""}`).join(", ");
+  const stepText = (s: ComputerStep) =>
+    `pas ${s.step + 1} · ${cuPath(s.path)}${s.slow.length ? ` · ${acts(s)}` : s.action ? ` · ${s.action}${s.p != null ? ` ${pct(s.p)}` : ""}` : ""}`;
+  const live = $derived.by(() => {
+    if (!cu || b.status !== "running") return "";
+    const l = cu.live;
+    if (l) return `pas ${l.step + 1} · ${l.kind === "action" ? `Bonsai : ${l.action ?? "?"}${l.blocked ? " (refuse)" : ""}` : `Bonsai reflechit${l.turn ? ` · tour ${l.turn + 1}` : ""}`}`;
+    const s = cu.steps[cu.steps.length - 1];
+    return s ? stepText(s) : "";
+  });
   let open = $state<boolean | null>(null);
-  const isOpen = $derived(open ?? (!!meta.open && b.status !== "running" && (b.name !== "run_command" || !!(b.result?.stdout || b.result?.stderr))));
+  const isOpen = $derived(
+    open ??
+      (!!meta.open && (b.status !== "running" || !!cu?.steps.length) && (b.name !== "run_command" || !!(b.result?.stdout || b.result?.stderr))),
+  );
   const stats = $derived(b.ui?.diff ? parseUnifiedDiff(b.ui.diff) : null);
   const dur = $derived(b.started && b.ended ? (b.ended - b.started) * 1000 : undefined);
   const r = $derived(b.result ?? {});
@@ -48,7 +64,9 @@
     <span class="ic" class:s1={judge}><meta.icon size={14} /></span>
     <span class="verb">{meta.verb}</span>
     <span class="target mono">{target}</span>
+    {#if live}<span class="live tabnum" title={cu?.live?.why ?? ""}>{live}</span>{/if}
     <span class="right">
+      {#if cu?.escalations}<span class="chip tabnum" title="Pas confies a Bonsai">{cu.escalations} escalade{cu.escalations > 1 ? "s" : ""}</span>{/if}
       {#if stats && (stats.added || stats.removed)}
         <span class="delta mono"><b class="add">+{stats.added}</b> <b class="del">−{stats.removed}</b></span>
       {/if}
@@ -107,12 +125,35 @@
         </div>
       {:else if b.name === "create_tool"}
         <pre class="code mono">{@html highlight(a.python_body ?? "", "python")}</pre>
-      {:else if b.name === "desktop"}
-        <div class="note">
-          {r.window ?? ""} <span class="faint">{r.app ?? ""}</span> · {r.steps ?? 0} pas{r.fast_steps != null ? ` dont ${r.fast_steps} decides par le classifieur` : ""} · {r.status ?? ""}
-        </div>
-      {:else if b.name === "browse"}
-        <div class="note">{r.title ?? ""} <span class="faint">{r.url ?? ""}</span> · {r.steps ?? 0} pas · {r.status ?? ""}</div>
+      {:else if computer}
+        {#if b.status !== "running"}
+          <div class="note">
+            {#if b.name === "desktop"}{r.window ?? ""} <span class="faint">{r.app ?? ""}</span>{:else}{r.title ?? ""} <span class="faint">{r.url ?? ""}</span>{/if}
+            · {r.steps ?? 0} pas{r.fast_steps != null ? ` dont ${r.fast_steps} decides par le classifieur` : ""}{r.escalations ? ` · ${r.escalations} escalade${r.escalations > 1 ? "s" : ""}` : ""}
+            · <b class="st" class:bad={r.ok === false}>{cuStatus(r.status)}</b>
+            {#if r.s1_calls}<span class="faint"> · classifieur : {r.s1_calls} lecture{r.s1_calls > 1 ? "s" : ""}, {ms(r.s1_ms)}</span>{/if}
+          </div>
+          {#if r.summary}<div class="note sum">{r.summary}</div>{/if}
+          {#if r.blocked_steps?.length}
+            <div class="note refused">Pas refuses : {r.blocked_steps.map((x: any) => `${x.type}${x.target != null ? ` [${x.target}]` : x.keys ? ` ${x.keys}` : x.name ? ` ${x.name}` : ""}`).join(", ")}</div>
+          {/if}
+        {/if}
+        {#if cu?.steps.length}
+          <ol class="cu">
+            {#each cu.steps as s (s.step)}
+              <li class="cs {s.path ?? ''}">
+                <span class="n tabnum">{s.step + 1}</span>
+                <span class="path">{cuPath(s.path)}</span>
+                {#if s.slow.length}
+                  <span class="mono act">{acts(s)}</span>
+                {:else}
+                  <span class="mono act">{s.action ?? "—"}</span>{#if s.p != null}<b class="tabnum">{pct(s.p)}</b>{/if}
+                {/if}
+                {#if s.why && s.path !== "fast"}<span class="why" title={s.why}>{s.why}</span>{/if}
+              </li>
+            {/each}
+          </ol>
+        {/if}
       {:else}
         <pre class="out mono">{JSON.stringify(r, null, 2).slice(0, 4000)}</pre>
       {/if}
@@ -160,4 +201,18 @@
   .meter b { text-align: right; font-weight: 560; color: var(--text); }
   .errbox { padding: 10px 14px; color: var(--err); font-size: 12.5px; background: var(--err-soft); }
   .note { padding: 10px 14px; font-size: 12.5px; color: var(--text-2); }
+  .note + .note { padding-top: 0; }
+  .note .st { font-weight: 600; color: var(--ok); }
+  .note .st.bad { color: var(--err); }
+  .note.refused { color: var(--warn); }
+  .live { flex: 0 1 auto; min-width: 0; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--s2); }
+  .cu { list-style: none; margin: 0; padding: 6px 14px 10px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+  .cs { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12px; color: var(--text-2); }
+  .cs .n { flex: none; width: 22px; text-align: right; color: var(--text-4); }
+  .cs .path { flex: none; font-size: 11px; padding: 0 6px; border-radius: 6px; background: var(--s1-soft); color: var(--s1); }
+  .cs.escalated .path, .cs.escalated_after_verify .path { background: var(--s2-soft); color: var(--s2); }
+  .cs.blocked .path { background: var(--warn-soft); color: var(--warn); }
+  .cs .act { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cs b { flex: none; font-weight: 560; color: var(--text); }
+  .cs .why { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
 </style>

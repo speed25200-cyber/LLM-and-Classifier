@@ -285,6 +285,8 @@ def test_sessions_wire_confirm_events_stop_and_ledgers_into_both_factories(tmp_p
     monkeypatch.setattr(ss, "make_browser_factory", fake_browser)
     monkeypatch.setattr(ss, "make_desktop_factory", fake_desktop)
     monkeypatch.setattr(ss, "Prophet", FakeProphet)
+    import jev_clone.computer_use as cu   # l'outil navigateur n'est propose que si Playwright et Chromium sont la
+    monkeypatch.setattr(cu, "browser_available", lambda: (True, ""))
     for mode in ("smart", "auto"):
         st = Settings(browser_tool=True, desktop_tool=True, workspace=str(tmp_path / "ws"), permission_mode=mode)
         svc = ss.AgentService(ss.SessionStore(tmp_path / "sessions"), published.append, urls=lambda: ("http://127.0.0.1:9", "http://127.0.0.1:9"),

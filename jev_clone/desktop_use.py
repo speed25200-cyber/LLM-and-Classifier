@@ -329,17 +329,18 @@ class DesktopSlowPolicy(SlowPolicy):
 def make_desktop_factory(s1_engine, s2_backend, backend_factory: Callable[[], DesktopBackend] | None = None, vision: bool = False,
                          max_steps: int = 24, confirm: Callable[[str, dict], bool] | None = None,
                          on_event: Callable[[dict], None] | None = None, should_stop: Callable[[], bool] | None = None,
-                         ledger: str | Path | None = None):
+                         ledger: str | Path | None = None, max_tokens: int = 2048):
     """Fabrique l'outil `desktop` de Prophet : run(goal, app=None, slots=None) -> resultat compact.
     confirm : autorisation des pas risques (sans elle, ils sont refuses) ; on_event / should_stop : progression par pas et
-    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py)."""
+    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py) ;
+    max_tokens : generation de Bonsai par tour (sa reflexion en prend au plus 60 %, comme dans Prophet)."""
     def factory():
         def run(goal: str, app: str | None = None, slots: dict | None = None) -> dict:
             def go() -> dict:
                 backend = backend_factory() if backend_factory else WindowsUIABackend()
                 session = DesktopSession(backend, screenshot=vision)
-                agent = ComputerUseAgent(session, FastPolicy(s1_engine),
-                                         DesktopSlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine), vision=vision), max_steps=max_steps,
+                slow = DesktopSlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine), vision=vision, max_tokens=max_tokens)
+                agent = ComputerUseAgent(session, FastPolicy(s1_engine), slow, max_steps=max_steps,
                                          ledger=ledger, confirm=confirm, on_event=on_event, should_stop=should_stop, kind="desktop")
                 out = agent.run(goal, url=app, slots=slots or {})
                 final = session.observe()

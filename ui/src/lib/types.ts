@@ -365,3 +365,51 @@ export interface Runtime {
 export interface CoreState {
   browser?: { available: boolean; reason: string };
 }
+
+// ---- computer use : progression par pas de browse / desktop (evenements computer.*, reduits sur le bloc d'outil) ----
+export interface ComputerAction {
+  action: string | null;
+  blocked: boolean;
+  ok: boolean | null;
+}
+/** Un pas termine : voie (fast | escalated | escalated_after_verify | blocked), action du classifieur et sa probabilite,
+ *  raison de l'escalade, actions de Bonsai. */
+export interface ComputerStep {
+  step: number;
+  path: string | null;
+  action: string | null;
+  p: number | null;
+  why: string | null;
+  verify: number | null;
+  error: string | null;
+  escalations: number;
+  slow: ComputerAction[];
+}
+/** Entre deux pas : escalade vers Bonsai, tour de reflexion, action en cours. */
+export interface ComputerLive {
+  kind: "escalate" | "think" | "action" | "";
+  step: number;
+  why: string | null;
+  turn: number | null;
+  action: string | null;
+  blocked: boolean;
+}
+export interface ComputerProgress {
+  steps: ComputerStep[];
+  n: number;
+  escalations: number;
+  pending: ComputerAction[];
+  live: ComputerLive | null;
+}
+export type ToolBlock = Extract<Block, { type: "tool" }> & { cu?: ComputerProgress };
+
+// ---- banc de mesure : series du classifieur sur un etat neuf / relu (server.bench) ----
+export interface Bench {
+  s1_cold_p50_ms?: number;
+  s1_cold_p95_ms?: number;
+  s1_cold_prefill_tokens?: number;
+  s1_warm_p50_ms?: number;
+  s1_warm_p95_ms?: number;
+  s1_warm_prefill_tokens?: number;
+  s1_series?: Record<string, string>;
+}

@@ -1,6 +1,7 @@
 // Reducteur de transcription : miroir exact de prophet_studio/sessions.py:reduce_event, plus quelques champs
 // d'affichage (horodatages des outils, outil en preparation, duree de reflexion).
 import type { AssistantItem, Block } from "./types";
+import type { ComputerAction, ComputerLive, ComputerProgress, ToolBlock } from "./types";
 
 export function newAssistant(turn_id: string, plan_mode = false): AssistantItem {
   return { kind: "assistant", turn_id, blocks: [], status: "running", ts: Date.now() / 1000, plan_mode, pending_tool: null };
@@ -75,6 +76,50 @@ export function reduce(item: AssistantItem, evt: any): void {
       item.status = "error";
       item.error = evt.error;
       break;
+    case "computer.escalate":
+    case "computer.think":
+    case "computer.action":
+    case "computer.step":
+      reduceComputer(blocks, evt);
+      break;
+  }
+}
+
+// ---- computer use : progression par pas (miroir de prophet_studio/sessions.py:reduce_computer) ----
+export const CU_KEEP = 40;
+const clip = (v: unknown, n = 200): string | null => ((v as string) || "").slice(0, n) || null;
+
+/** Rattache les evenements computer.* a l'outil en cours du meme nom (Prophet execute ses outils un par un). Les actions
+ *  de Bonsai arrivent avant le computer.step de leur pas. */
+function reduceComputer(blocks: Block[], evt: any) {
+  let b: ToolBlock | undefined;
+  for (let i = blocks.length - 1; i >= 0 && !b; i--) {
+    const x = blocks[i];
+    if (x.type === "tool" && x.status === "running" && x.name === evt.tool) b = x as ToolBlock;
+  }
+  if (!b) return;
+  const cu: ComputerProgress = (b.cu ??= { steps: [], n: 0, escalations: 0, pending: [], live: null });
+  const base: ComputerLive = cu.live ?? { kind: "", step: cu.n, why: null, turn: null, action: null, blocked: false };
+  if (evt.type === "computer.escalate") {
+    cu.escalations = evt.escalations || cu.escalations;
+    cu.live = { kind: "escalate", step: evt.step ?? cu.n, why: clip(evt.why), turn: null, action: null, blocked: false };
+  } else if (evt.type === "computer.think") {
+    cu.live = { ...base, kind: "think", turn: evt.turn || 0 };
+  } else if (evt.type === "computer.action") {
+    const a: ComputerAction = { action: evt.action ?? null, blocked: !!evt.blocked, ok: !!evt.ok };
+    cu.pending.push(a);
+    cu.live = { ...base, kind: "action", action: a.action, blocked: a.blocked };
+  } else {
+    const slow: ComputerAction[] = cu.pending.length ? cu.pending : (evt.slow_actions ?? []).map((x: string) => ({ action: x, blocked: false, ok: null }));
+    cu.steps.push({
+      step: evt.step ?? cu.n, path: evt.path ?? null, action: evt.action ?? null, p: evt.p ?? null, why: clip(evt.why),
+      verify: evt.verify ?? null, error: clip(evt.error), escalations: evt.escalations || 0, slow,
+    });
+    if (cu.steps.length > CU_KEEP) cu.steps.splice(0, cu.steps.length - CU_KEEP);
+    cu.n += 1;
+    cu.pending = [];
+    cu.live = null;
+    cu.escalations = evt.escalations || cu.escalations;
   }
 }
 
