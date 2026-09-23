@@ -246,8 +246,11 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         notes.append(f"{m.label} entierement sur GPU, cache KV {kv} ({ctx // 1024} k tokens de contexte).")
     else:
         notes.append(f"{m.label} : Bonsai 2 ne tient pas avec ce budget ({avail:.0f} Mio) ou la priorite 'vitesse' est choisie.")
-    notes.append(f"Classifieur (System One) sur GPU : ~0,05-0,15 s par decision (estimation GPU, {s1_np} slot{'s' if s1_np > 1 else ''} "
-                 f"de {S1_CTX // 1024} k tokens chacun)." if s1_gpu else
+    # slots : lectures simultanees (autre session, voix). Un etat neuf est lu une fois, sur un slot, puis ses questions passent
+    # en sequence sur ce cache (backend_llamacpp.score_branches) : un autre slot relirait l'etat entier
+    notes.append(f"Classifieur (System One) sur GPU : ~0,05-0,15 s par decision une fois l'etat lu (estimation GPU, {s1_np} "
+                 f"slot{'s' if s1_np > 1 else ''} de {S1_CTX // 1024} k tokens chacun ; un etat neuf est lu une fois, sur un seul slot)."
+                 if s1_gpu else
                  "Classifieur (System One) sur CPU pour laisser le contexte au 27B : un seul slot, questions en sequence sur le meme cache ; "
                  "~0,1-0,3 s par decision une fois l'etat lu, plus la lecture d'un etat neuf (prefill CPU, ~0,5-1 s pour 2 k tokens). "
                  "Estimations : mesurez avec le banc.")

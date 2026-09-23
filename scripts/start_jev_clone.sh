@@ -14,11 +14,14 @@ MODEL="${JEV_GGUF:-$(find_gguf "$JEV_FAMILY" "$JEV_SIZE" "${JEV_BAND:-}")}" || {
 export LD_LIBRARY_PATH="$(dirname "$BIN")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "=== Clone Jev (System One) ==="
 echo "  modele  : $MODEL"
-echo "  ctx=$JEV_CTX ngl=$JEV_NGL slots=$JEV_NP  ->  http://127.0.0.1:${JEV_PORT:-8081}"
+echo "  ctx=$JEV_CTX par slot x $JEV_NP slots ngl=$JEV_NGL kv=${JEV_KV_TYPE:-q8_0}  ->  http://127.0.0.1:${JEV_PORT:-8081}"
 echo "  export JEV_S1_URL=http://127.0.0.1:${JEV_PORT:-8081}  JEV_S2_URL=http://127.0.0.1:${BONSAI_PORT:-8080}"
 # Pas de generation : la temperature/top-k n'importent pas (le client envoie samplers=[] + grammaire).
 # --reasoning-budget 0 evite toute reflexion si un client passe par /v1/chat/completions.
+# JEV_CTX = contexte PAR SLOT, comme le planificateur de Prophet Studio (planner.kv_ctx) : -c = JEV_CTX x JEV_NP, KV non
+# unifie, chaque slot a son contexte entier (un etat Prophet fait ~2-3 k tokens). KV q8_0 (celui du Studio) : moitie de f16.
 exec "$BIN" -m "$MODEL" --host 127.0.0.1 --port "${JEV_PORT:-8081}" \
-    -ngl "$JEV_NGL" -fa on -c "$JEV_CTX" -np "$JEV_NP" -b 2048 -ub 512 \
+    -ngl "$JEV_NGL" -fa on -c "$((JEV_CTX * JEV_NP))" -np "$JEV_NP" -b 2048 -ub 512 \
+    --cache-type-k "${JEV_KV_TYPE:-q8_0}" --cache-type-v "${JEV_KV_TYPE:-q8_0}" \
     --cache-ram "${JEV_CACHE_RAM:-1024}" --ctx-checkpoints 8 --reasoning-budget 0 --no-mmproj \
     "$@"
