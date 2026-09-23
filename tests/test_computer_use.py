@@ -28,6 +28,17 @@ def session():
     s.close()
 
 
+def test_failed_launch_releases_playwright(tmp_path, monkeypatch):
+    # sans navigateur (runner Windows de la CI) : l'echec ne doit pas laisser la boucle de Playwright active,
+    # sinon tout sync_playwright() suivant du meme fil echoue ("Sync API inside the asyncio loop")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "vide"))
+    with pytest.raises(Exception):
+        BrowserSession(headless=True, chromium=str(tmp_path / "absent" / "chrome"))
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        assert p.chromium is not None
+
+
 def _probs(action, target=None, slot=None):
     t = {"action": [0.9 if a == action else 0.1 / 5 for a in A]}
     if target is not None:

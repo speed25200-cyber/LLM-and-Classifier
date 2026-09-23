@@ -173,7 +173,13 @@ uv run prophet-studio --demo                      # faux serveurs, interface com
 cd ui && npm install && npm run dev               # interface en rechargement a chaud (coeur lance avec --dev --token dev)
 cd ui && npm run check && npm run build           # verifie les types et reconstruit prophet_studio/web
 uv run pytest -q                                  # coeur, agent, voix, bureau, API : sans GPU (faux llama-server)
+cd desktop && npm ci && npm run sidecar && npm run dev   # application de bureau (voir desktop/README.md)
 ```
+
+`uv.lock` fige les versions : les installateurs et l'application de bureau l'embarquent (installations
+reproductibles). La CI (`.github/workflows/ci.yml`) lance les tests Python sous Linux et Windows, verifie et
+construit l'interface, et passe `cargo fmt` / `clippy` / `test` sur la coquille ; `desktop.yml` construit les
+paquets (NSIS, MSI, deb, AppImage, dmg) sur une etiquette `v*`.
 
 ## 9. Ce qui est verifie, ce qui ne l'est pas
 
@@ -188,10 +194,18 @@ Verifie ici (sans GPU) :
   (moteur factice) -> routage -> commande « nouvelle session » executee par l'interface (`tests/test_voice_e2e.py`) ;
 * la diffusion token par token (un correctif : `iter_lines` lisait par paquets de 512 octets) ;
 * le classifieur en panne : le tour se termine avec Bonsai seul, actions risquees confirmees ;
-* 101 tests (`pytest`) : 97 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
+* l'application de bureau sous Linux (Xvfb) : AppImage et .deb construits, fenetre 1440x900 connectee au coeur
+  (CSP et IPC), jeton et origine `tauri://localhost`, redemarrage automatique apres un plantage, fermeture en
+  moins d'une seconde avec arret du coeur et des llama-server, `--parent-pid`, raccourci global ; uv embarque qui
+  prepare Python 3.11 et les dependances ; `cargo clippy` propre aussi pour les cibles Windows et macOS ;
+* `install.sh` (installation reelle, mise a jour en place) et `install.ps1` (analyse et chaine zip -> uv sync ->
+  lanceur executees sous PowerShell 7) ;
+* 102 tests (`pytest`) : 98 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
 
 Non verifie ici (pas de GPU ni d'acces a Hugging Face / aux releases GitHub depuis l'environnement de redaction) :
 * les debits reels sur RTX 5060 (estimations ; bouton **Mesurer** et `eval/SCOREBOARD.md` pour les remplacer) ;
 * les noms exacts des assets de la release PrismML pour Windows (le choix se fait sur la liste reelle de la
   release, avec des noms construits en repli) et des archives vocales sherpa-onnx ;
 * la reconnaissance et la synthese vocales avec les vrais modeles, UI Automation sur un vrai Windows.
+* l'application de bureau sous Windows et macOS (WebView2, Job Object, installateurs NSIS / MSI / dmg, gain de
+  VRAM de `--disable-gpu`), le micro de WebKitGTK sous Linux.

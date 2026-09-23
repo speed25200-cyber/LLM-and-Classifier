@@ -79,10 +79,15 @@ class BrowserSession:
                 if c and os.path.exists(c):
                     exe = c; break
         try:
-            self.browser = self._pw.chromium.launch(headless=headless, executable_path=exe) if exe else self._pw.chromium.launch(headless=headless)
+            try:
+                self.browser = self._pw.chromium.launch(headless=headless, executable_path=exe) if exe else self._pw.chromium.launch(headless=headless)
+            except Exception:
+                self.browser = self._pw.chromium.launch(headless=headless)
+            self.page = self.browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
         except Exception:
-            self.browser = self._pw.chromium.launch(headless=headless)
-        self.page = self.browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+            # sans cet arret, la boucle de Playwright reste active dans ce fil et tout sync_playwright() suivant echoue
+            self._pw.stop()
+            raise
         self.max_elements = max_elements
         self.screenshot = screenshot
         self._locators: list = []

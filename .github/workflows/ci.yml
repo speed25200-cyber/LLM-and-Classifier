@@ -26,15 +26,16 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Dependances (studio + dev)
         run: uv sync --extra studio --extra dev --python 3.11
 
-      # Chromium pour les tests pilotes par Playwright (interface, computer use) ; sans lui ils sont sautes.
-      - name: Navigateur Playwright (Linux)
-        if: runner.os == 'Linux'
-        run: uv run --no-sync playwright install --with-deps chromium
+      # Chromium pour les tests pilotes par Playwright (interface, voix, computer use) ; sans lui ils sont sautes.
+      - name: Navigateur Playwright
+        run: uv run --no-sync playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium
 
       - name: Tests (faux llama-server, sans GPU)
         run: uv run --no-sync pytest -q
