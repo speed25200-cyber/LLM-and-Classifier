@@ -64,6 +64,7 @@ class Studio:
         self.runtime.on_measure = self._record_vram
         self._load_vram_calibration()
         self.last_bench: dict | None = None
+        self.user_stopped = False   # Stop de l'utilisateur : aucune fin d'installation ne relance les modeles avant un Demarrer
         self.started = time.time()
         if demo:
             self._prepare_demo()
@@ -122,9 +123,10 @@ class Studio:
         self.bus.publish({"type": "runtime.calibrated", "model": m.id, "used_mib": round(used_mib), "overhead_mib": round(over)})
 
     def _autostart_after_install(self) -> None:
-        """Des que le runtime et Bonsai sont la, les modeles demarrent seuls : installer = pouvoir utiliser."""
-        if (self.settings.get().autostart_models and self.runtime.state in ("stopped", "error")
-                and not self.recommended_missing_core() and not self.downloader_busy()):
+        """Des que le runtime et Bonsai sont la, les modeles demarrent seuls : installer = pouvoir utiliser. Jamais apres un
+        Stop de l'utilisateur (jusqu'au prochain demarrage explicite)."""
+        if (self.settings.get().autostart_models and not self.user_stopped and self.runtime.state in ("stopped", "error")
+                and not self.recommended_missing_core() and not self.downloader_busy() and self.may_autostart()):
             self.start_runtime()
         elif self.runtime.can_attach_s1():
             # Bonsai tourne seul (mode mono) et le classifieur vient d'arriver : il demarre sans relancer Bonsai
@@ -152,10 +154,22 @@ class Studio:
         return make_plan(self.hw, priority or st.priority, s2 or st.s2_model, s1 or st.s1_model, ctx if ctx is not None else st.ctx_override,
                          other_used_mib=other)
 
+    def may_autostart(self) -> bool:
+        """Un plan CPU qui ne tient pas en RAM n'est jamais lance sans accord (comme l'interface) : le demarrage automatique
+        (lancement de l'application, fin d'installation) est suspendu et le dit ; seul un demarrage explicite le lance."""
+        p = self.plan()
+        if p.backend == "cpu" and p.rung == 0 and not p.fits:
+            self.runtime.note("RAM insuffisante pour ce plan : demarrage automatique suspendu "
+                              "(« Lancer quand meme » dans l'ecran Modeles, ou un modele plus petit)")
+            return False
+        return True
+
     def start_runtime(self) -> None:
-        st = self.settings.get()
-        plan = self.plan()
-        threading.Thread(target=self.runtime.start, args=(plan, (st.s2_port, st.s1_port)), daemon=True, name="runtime-start").start()
+        """La generation d'arret est lue ici, a la demande : un Stop passe avant que ce demarrage ait son tour l'annule."""
+        st, plan, gen = self.settings.get(), self.plan(), self.runtime.generation()
+        self.user_stopped = False   # un demarrage (explicite, ou automatique hors Stop) : les fins d'installation relancent a nouveau
+        threading.Thread(target=self.runtime.start, args=(plan, (st.s2_port, st.s1_port)), kwargs={"gen": gen}, daemon=True,
+                         name="runtime-start").start()
 
     def recommended(self) -> list[dict]:
         ids = self.installer.recommended(self.plan())
@@ -269,7 +283,7 @@ def build_app(studio: Studio) -> FastAPI:
         studio.bus.bind(loop)
         metrics = loop.create_task(_metrics_loop())
         st = studio.settings.get()
-        if st.autostart_models and not studio.recommended_missing_core():
+        if st.autostart_models and not studio.recommended_missing_core() and studio.may_autostart():
             studio.start_runtime()
         if st.voice.enabled:
             studio.voice.preload()
@@ -465,6 +479,7 @@ def build_app(studio: Studio) -> FastAPI:
 
     @app.post("/api/runtime/stop")
     def rt_stop():
+        studio.user_stopped = True   # avant l'arret : une fin d'installation pendant l'arret ne relance rien
         studio.runtime.stop()
         return {"ok": True}
 

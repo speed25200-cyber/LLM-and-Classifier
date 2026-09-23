@@ -297,7 +297,8 @@ class AgentService:
                                   desktop_factory=make_desktop_factory(s1, s2, self.desktop_backend, ledger=runs / "desktop_trajectories.jsonl", **cu)
                                   if desktop_ok else None)
                 turn = prophet.handle(text, session["history"], effort=eff)
-                session["history"] += [{"role": "user", "content": text}, {"role": "assistant", "content": turn.response}]
+                if turn.response or turn.stopped_by != "cancelled":   # Stop avant toute reponse : pas de reponse vide en contexte
+                    session["history"] += [{"role": "user", "content": text}, {"role": "assistant", "content": turn.response}]
             except Exception as e:
                 emit({"type": "turn.error", "error": f"{type(e).__name__}: {str(e)[:500]}"})
             finally:

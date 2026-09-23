@@ -12,10 +12,12 @@
   * classifieur absent ou en echec : repli automatique en mode "mono" (Bonsai repond aussi aux questions System One) ;
     s'il est installe ensuite, il demarre seul et le duo revient (attach_s1), sans relancer Bonsai ; un classifieur
     abandonne (echec, 2e arret) ne revient que si son fichier change ;
-  * stop() gagne toujours, meme pendant le premier demarrage : plus rien n'est lance ni publie ensuite ;
+  * stop() gagne toujours, meme pendant le premier demarrage : plus rien n'est lance ni publie ensuite, et un demarrage
+    deja demande (en file derriere un autre) n'a plus lieu (numero de generation) ;
   * watchdog apres le demarrage : un serveur qui s'arrete tout seul est detecte (poll du processus). System One est
-    relance une fois (Bonsai repond en attendant), puis mode mono ; Bonsai est relance une fois (etat transitoire
-    "starting", restarting = "s2"), sinon etat error. Une erreur imprevue n'arrete jamais la surveillance.
+    relance une fois dans son propre fil (Bonsai repond en attendant, toujours surveille), puis mode mono ; Bonsai est
+    relance une fois (etat transitoire "starting", restarting = "s2"), sinon etat error. Le retour du classifieur ne publie
+    jamais "ready" sans Bonsai. Une erreur imprevue n'arrete jamais la surveillance.
 """
 
 from __future__ import annotations
@@ -262,6 +264,7 @@ class Runtime:
         self._watch: threading.Event | None = None
         self._guard = threading.Lock()
         self._s1_busy = threading.Lock()
+        self._gen = 0                                # +1 a chaque stop() : un demarrage en file d'une generation passee n'a pas lieu
         self._cmd: list[str] = []
         self._ports = (0, 0)
         self._s2_args: list[str] = []
@@ -300,14 +303,28 @@ class Runtime:
     def pids(self) -> set[int]:
         return {p.proc.pid for p in (self.s1, self.s2) if p.proc is not None}
 
-    def start(self, plan: Plan, ports: tuple[int, int], max_rungs: int = 16) -> bool:
+    def generation(self) -> int:
+        """Numero d'arret : un demarrage demande avant le dernier stop() n'a plus lieu (voir start(gen=...)). Lu sans verrou
+        (un entier) : une requete ne reste jamais bloquee derriere un arret en cours ; start() le compare sous _guard."""
+        return self._gen
+
+    def note(self, message: str) -> None:
+        """Message du moteur sans changer d'etat (ex. demarrage automatique suspendu)."""
+        with self._guard:
+            self._status(self.state, message)
+
+    def start(self, plan: Plan, ports: tuple[int, int], max_rungs: int = 16, gen: int | None = None) -> bool:
+        """gen : generation() lue a la demande. Un demarrage en file derriere un autre (verrou) ne part pas si un Stop est
+        passe entre-temps : stop() gagne aussi contre les demarrages deja demandes."""
         with self._lock:
             cmd = self.server_cmd()
-            if not cmd:
-                self._status("error", "runtime llama.cpp absent : installez-le depuis l'ecran Modeles")
-                return False
-            self.stop()
             with self._guard:
+                if gen is not None and gen != self._gen:
+                    return False
+                if not cmd:
+                    self._status("error", "runtime llama.cpp absent : installez-le depuis l'ecran Modeles")
+                    return False
+                self._halt_locked()
                 self._watch = ev = threading.Event()
                 self._cmd, self._ports, self.restarts, self.restarting, self._s1_failed = cmd, ports, {"s1": 0, "s2": 0}, None, None
                 self._status("starting", "demarrage de Bonsai (System Two)")
@@ -417,9 +434,11 @@ class Runtime:
                     self._status(st, f"surveillance : {type(e).__name__}: {e}"[:300])
 
     def _s1_died(self, ev: threading.Event) -> None:
-        """System One est relance une fois (Bonsai repond en attendant : mode mono), puis reste en mode mono."""
+        """System One est relance une fois (Bonsai repond en attendant : mode mono), puis reste en mode mono. La relance
+        (jusqu'a s1_timeout) tourne dans son propre fil : le watchdog continue de surveiller Bonsai pendant ce temps."""
         if not self._s1_busy.acquire(blocking=False):
             return
+        handed = False
         try:
             with self._guard:
                 if ev.is_set():
@@ -437,7 +456,21 @@ class Runtime:
                     self._s1_failed = self._s1_sig()
                     self._status("degraded", f"{MONO_MSG} ; 2e arret inattendu du classifieur : {cause}")
             if again:
-                self._restore_s1(ev, f"classifieur redemarre apres un arret inattendu ({cause})")
+                threading.Thread(target=self._relaunch_s1, args=(ev, cause), daemon=True, name="runtime-s1").start()
+                handed = True
+        finally:
+            if not handed:
+                self._s1_busy.release()
+
+    def _relaunch_s1(self, ev: threading.Event, cause: str) -> None:
+        try:
+            self._restore_s1(ev, f"classifieur redemarre apres un arret inattendu ({cause})")
+        except Exception as e:   # meme filet que le watchdog : une erreur imprevue ne laisse pas la relance affichee en silence
+            with self._guard:
+                if not ev.is_set() and self.restarting == "s1":
+                    self.restarting = None
+                    if self.s2.alive():
+                        self._status("degraded", f"surveillance : {type(e).__name__}: {e}"[:300])
         finally:
             self._s1_busy.release()
 
@@ -477,14 +510,20 @@ class Runtime:
         with self._guard:
             if ev.is_set():
                 return False
-            self.restarting = None
+            if self.restarting == "s1":          # seulement la sienne : une relance de Bonsai en cours garde "s2"
+                self.restarting = None
+            # Bonsai en relance (_s2_died publiera l'etat final, il lit mono et plan) ou arrete sans que le watchdog l'ait
+            # encore vu (il le verra, ou l'etat reste "error") : rien n'est publie ici, jamais "ready" sans Bonsai
+            say = self.restarting is None and self.s2.alive()
             if q is None:
                 if s1m is not None:              # echec de la relance : abandon jusqu'a un nouveau fichier
                     self._s1_failed = self._s1_sig()
-                self._status("degraded", MONO_MSG + (f" ; relance du classifieur impossible : {self.s1.reason()}" if s1m is not None else ""))
+                if say:
+                    self._status("degraded", MONO_MSG + (f" ; relance du classifieur impossible : {self.s1.reason()}" if s1m is not None else ""))
                 return False
             self.plan, self.mono, self._s1_failed = q, False, None
-            self._status("ready", ok_msg)
+            if say:
+                self._status("ready", ok_msg)
             return True
 
     def can_attach_s1(self) -> bool:
@@ -530,15 +569,20 @@ class Runtime:
                 pass
 
     def stop(self) -> None:
+        """Arret demande (bouton Stop, sortie de l'application) : annule aussi les demarrages deja demandes."""
         with self._guard:
-            if self._watch is not None:
-                self._watch.set()
-                self._watch = None
-            self.restarting = None
-            self.s1.stop()
-            self.s2.stop()
-            if self.state != "stopped":
-                self._status("stopped")
+            self._gen += 1
+            self._halt_locked()
+
+    def _halt_locked(self) -> None:   # _guard tenu ; le nettoyage d'un demarrage passe ici sans changer de generation
+        if self._watch is not None:
+            self._watch.set()
+            self._watch = None
+        self.restarting = None
+        self.s1.stop()
+        self.s2.stop()
+        if self.state != "stopped":
+            self._status("stopped")
 
     def healthy(self) -> bool:
         return self.s2.alive() and (self.mono or self.s1.alive())

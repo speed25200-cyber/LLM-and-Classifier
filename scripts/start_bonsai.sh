@@ -34,13 +34,15 @@ if [ "$BONSAI_FAMILY" = bonsai2 ]; then SAMPLING="--temp 1.0 --top-p 0.95 --top-
 echo "=== Bonsai (System Two) ==="
 echo "  modele  : $MODEL"
 echo "  binaire : $BIN"
-echo "  ctx=$BONSAI_CTX ngl=$BONSAI_NGL slots=$BONSAI_NP kv4=${BONSAI_KV4:-0} mmproj=${BONSAI_MMPROJ:-off} budget=${BONSAI_REASONING_BUDGET:--1}"
+echo "  ctx=$BONSAI_CTX par slot x $BONSAI_NP slots ngl=$BONSAI_NGL kv4=${BONSAI_KV4:-0} mmproj=${BONSAI_MMPROJ:-off} budget=${BONSAI_REASONING_BUDGET:--1}"
 [ -n "$lora" ] && echo "  LoRA    : $LORA (echelle ${BONSAI_LORA_SCALE:-1.0})"
 echo "  API     : http://127.0.0.1:${BONSAI_PORT:-8080}/v1/chat/completions"
 # --cache-ram : cache de prompts en RAM (reutilisation du prefixe entre slots) ; --ctx-checkpoints : points de
 # reprise de l'etat recurrent (modeles hybrides GDN) pour reutiliser un prefixe partiel.
+# BONSAI_CTX = contexte PAR SLOT, comme le planificateur de Prophet Studio (planner.kv_ctx) : -c = BONSAI_CTX x BONSAI_NP,
+# KV non unifie, chaque slot (conversation ou lecture System One en mode mono) a son contexte entier.
 exec "$BIN" -m "$MODEL" --host 127.0.0.1 --port "${BONSAI_PORT:-8080}" \
-    -ngl "$BONSAI_NGL" -fa on -c "$BONSAI_CTX" -np "$BONSAI_NP" \
+    -ngl "$BONSAI_NGL" -fa on -c "$((BONSAI_CTX * BONSAI_NP))" -np "$BONSAI_NP" \
     $SAMPLING --jinja $mm $kv \
     --reasoning-budget "${BONSAI_REASONING_BUDGET:--1}" \
     --cache-ram "${BONSAI_CACHE_RAM:-2048}" --ctx-checkpoints 8 \

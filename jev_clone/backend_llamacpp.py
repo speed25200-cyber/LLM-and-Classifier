@@ -7,10 +7,15 @@ Pour chaque branche on envoie UNE requete /completion avec :
   * samplers = [], temperature = 1.0  (aucun top-k / top-p / min-p : distribution brute du modele)
   * cache_prompt = true               (le prefixe d'etat partage est reutilise entre branches)
 
-Jamais plus de requetes en parallele que de slots du serveur (/props total_slots) : avec -np 1 (classifieur sur CPU),
-les branches passent en sequence sur le meme slot et reutilisent l'etat deja lu. Une erreur du serveur remonte avec
-son message (ex. depassement du contexte du slot) au lieu d'un simple "500 Server Error". Si le KV partage d'un serveur
-lance avec -kvu est plein ("Context size has been exceeded"), les branches refusees repassent une a une.
+Jamais plus de requetes en parallele que de slots du serveur (/props total_slots). KV non unifie : seul le slot qui a lu
+la 1re branche garde l'etat, une branche envoyee sur un autre slot relit l'etat entier. Les branches suivantes passent
+donc en sequence sur ce slot (le serveur y renvoie le plus long prefixe commun) des que relire l'etat coute plus que ce
+qu'il reste a lire ; le parallele ne sert qu'aux petits etats. Une erreur du serveur remonte avec son message (ex.
+depassement du contexte du slot) au lieu d'un simple "500 Server Error". Si le KV partage d'un serveur lance avec -kvu
+est plein ("Context size has been exceeded"), les branches refusees repassent une a une.
+
+Generation diffusee : Stop est honore a tout moment, meme avant les en-tetes (requete en file derriere un slot occupe) :
+chaque requete diffusee a sa propre connexion, qu'un veilleur coupe (shutdown) des que should_stop() est vrai.
 
 Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp mainline
 (Bonsai 1-bit Q1_0, Ternary Q2_0_g64, Qwen3.5 GGUF...). Verifie contre un llama-server reel
@@ -20,6 +25,7 @@ Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextlib
 import json
 import logging
 import socket
@@ -30,6 +36,8 @@ from typing import Callable
 
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3 import HTTPConnectionPool
 
 from jev_clone.prompt import Branch, label_grammar
 from jev_clone.readout import probs_to_logits
@@ -53,17 +61,59 @@ def raise_for_status(r: requests.Response) -> None:
     raise requests.HTTPError(f"llama-server {r.status_code} : {msg}", response=r)
 
 
-def _abort(r) -> None:
-    """Coupe une reponse en flux depuis un autre fil : fermer la reponse ne debloque pas une lecture en attente sur la
-    socket (urllib3), on la ferme donc au niveau du systeme (shutdown), puis on libere la reponse."""
-    try:
-        r.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
-    except Exception:
-        pass
-    try:
-        r.close()
-    except Exception:
-        pass
+class _Cut:
+    """Stop d'une requete diffusee, a tout moment : en file derriere un slot occupe (le serveur n'envoie les en-tetes qu'au
+    lancement de la tache), pendant un long prefill ou pendant le flux. Le veilleur coupe (shutdown) les sockets de la
+    connexion propre a la requete : post() ou la lecture en attente se debloquent aussitot, llama-server abandonne la tache
+    (fermer la reponse ne debloque pas une lecture urllib3 en attente)."""
+
+    def __init__(self, should_stop: Callable[[], bool]):
+        self.should_stop, self.conns = should_stop, []   # connexions urllib3 (.sock) ou sockets
+        self.halted, self._done = threading.Event(), threading.Event()
+        threading.Thread(target=self._watch, daemon=True, name="stream-stop").start()
+
+    def _watch(self) -> None:
+        while not self._done.wait(0.1):
+            if self.halted.is_set() or self.should_stop():
+                self.halted.set()
+                for c in list(self.conns):   # connexion pas encore ouverte (sock None) : coupee au tour suivant
+                    s = getattr(c, "sock", c)
+                    if s is not None:
+                        with contextlib.suppress(OSError):
+                            s.shutdown(socket.SHUT_RDWR)
+
+    def track(self, r) -> None:
+        """Socket de la reponse : une connexion fermee apres le corps (HTTP/1.0, Connection: close) la cede a la reponse."""
+        with contextlib.suppress(AttributeError):
+            self.conns.append(r.raw._fp.fp.raw._sock)
+
+    def finish(self) -> None:
+        self._done.set()
+
+
+class _CutAdapter(HTTPAdapter):
+    """Session propre a une requete diffusee : chaque connexion ouverte est remise au veilleur (_Cut). Aucun pool partage,
+    une coupure ne touche jamais la requete d'une autre session."""
+
+    def __init__(self, conns: list):
+        self._conns = conns
+        super().__init__()
+
+    def init_poolmanager(self, *a, **kw):
+        super().init_poolmanager(*a, **kw)
+        conns = self._conns
+
+        class Pool(HTTPConnectionPool):
+            def _new_conn(self):
+                c = super()._new_conn()
+                conns.append(c)
+                return c
+        self.poolmanager.pool_classes_by_scheme = {**self.poolmanager.pool_classes_by_scheme, "http": Pool}
+
+
+def _cancelled() -> dict:
+    return {"choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "cancelled"}],
+            "usage": {}, "timings": {}, "cancelled": True}
 
 
 @dataclass
@@ -244,9 +294,9 @@ class LlamaCppBackend:
                             cached_tokens=int(tm.get("cache_n", 0) or 0), ms=ms)
 
     def score_branches(self, prefix: str, branches: list[Branch]) -> list[BranchResult]:
-        """La 1re branche est envoyee seule (elle remplit le cache du prefixe), les autres en parallele sur les slots
-        du serveur (-np N), jamais plus que ses slots : avec un seul slot (classifieur sur CPU), elles passent en sequence
-        et ne traitent que leur propre branche au lieu de re-preremplir l'etat sur d'autres slots."""
+        """La 1re branche est envoyee seule : elle remplit le cache du prefixe sur UN slot. KV non unifie : chaque slot de
+        plus relit l'etat entier. Les autres branches passent donc en sequence sur ce slot (ne lisant que leur propre
+        texte) sauf si l'etat est plus petit que ce qu'il reste a lire, et jamais plus en parallele que de slots."""
         if not branches:
             return []
         try:
@@ -257,7 +307,12 @@ class LlamaCppBackend:
         rest = branches[1:]
         if not rest:
             return [first]
-        workers = min(self.max_workers, self.slots()) if self.max_workers > 1 else 1
+        workers = min(self.max_workers, self.slots(), len(rest)) if self.max_workers > 1 else 1
+        # etat mesure par le serveur (prefixe + 1re branche) ; branches "valeurs" (sans mesure) : ~3 caracteres par token
+        state = (first.prompt_tokens + first.cached_tokens) or len(prefix) // 3
+        todo = sum(len(b.text) for b in rest) / 3
+        while workers > 1 and (workers - 1) * state > todo:   # chaque slot de plus relit l'etat : rentable seulement s'il est petit
+            workers -= 1
         if workers <= 1:
             return [first] + [self.score_branch(prefix, b) for b in rest]
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -303,7 +358,8 @@ class LlamaCppBackend:
         """/v1/chat/completions. Avec `on_delta`, la reponse est diffusee (SSE) : on_delta recoit
         {"type": "content"|"reasoning", "text"} et {"type": "tool_call", "index", "name", "args_delta"} au fil
         de l'eau ; le retour a la meme forme qu'une reponse non diffusee (message complet, usage, timings).
-        `should_stop()` vrai -> la connexion est fermee (llama-server arrete la generation) et on rend ce qui existe."""
+        `should_stop()` vrai -> la connexion est coupee (llama-server arrete ou abandonne la tache) et on rend ce qui existe
+        (cancelled=True), a tout moment : avant l'envoi, en file derriere un slot occupe, pendant le prefill ou le flux."""
         payload: dict = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
         if tools:
             payload["tools"] = tools
@@ -318,57 +374,78 @@ class LlamaCppBackend:
         if on_delta is not None:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
-        # Si la demande depasse le contexte du slot (prompt + max_tokens > n_ctx), llama-server repond 500 ;
-        # on reduit max_tokens et on reessaie plutot que de faire echouer tout le tour de l'agent.
-        for attempt in range(4):
-            r = self._session.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout,
-                                   stream=on_delta is not None)
-            if r.status_code < 400:
-                if on_delta is None:
-                    return r.json()
-                return self._read_stream(r, on_delta, should_stop)
-            msg = ""
-            try:
-                msg = json.dumps(r.json())
-            except Exception:
-                msg = r.text
-            if r.status_code in (400, 500) and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
-                payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
-                if payload.get("thinking_budget_tokens"):   # la reflexion ne doit pas avaler toute la reponse reduite
-                    payload["thinking_budget_tokens"] = min(payload["thinking_budget_tokens"], int(payload["max_tokens"] * 0.6))
-                continue
+        # Stop : une connexion propre a la requete, remise au veilleur (_Cut), qui la coupe meme avant les en-tetes (le fork
+        # ne repond qu'au lancement de la tache : en file derriere la generation d'une autre session, post() attendrait)
+        cut = _Cut(should_stop) if on_delta is not None and should_stop is not None else None
+        sess = self._session
+        if cut is not None:
+            sess = requests.Session()
+            sess.mount("http://", _CutAdapter(cut.conns))
+        try:
+            # Si la demande depasse le contexte du slot (prompt + max_tokens > n_ctx), llama-server repond 500 ;
+            # on reduit max_tokens et on reessaie plutot que de faire echouer tout le tour de l'agent.
+            for attempt in range(4):
+                if cut is not None and (cut.halted.is_set() or should_stop()):
+                    return _cancelled()   # Stop deja demande (pendant la lecture de System One...) : Bonsai n'est pas sollicite
+                try:
+                    r = sess.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=self.timeout,
+                                  stream=on_delta is not None)
+                    if cut is not None:
+                        cut.track(r)
+                    if r.status_code >= 400:
+                        _ = r.content   # corps d'erreur lu ici : une coupure pendant sa lecture est aussi un Stop
+                except requests.RequestException:
+                    if cut is not None and cut.halted.is_set():   # socket coupee par le veilleur : arret demande, pas une panne
+                        return _cancelled()
+                    raise
+                if r.status_code < 400:
+                    if on_delta is None:
+                        return r.json()
+                    return self._read_stream(r, on_delta, should_stop, cut)
+                msg = ""
+                try:
+                    msg = json.dumps(r.json())
+                except Exception:
+                    msg = r.text
+                if r.status_code in (400, 500) and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
+                    payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
+                    if payload.get("thinking_budget_tokens"):   # la reflexion ne doit pas avaler toute la reponse reduite
+                        payload["thinking_budget_tokens"] = min(payload["thinking_budget_tokens"], int(payload["max_tokens"] * 0.6))
+                    continue
+                raise_for_status(r)
             raise_for_status(r)
-        raise_for_status(r)
-        return r.json()
+            return r.json()
+        finally:
+            if cut is not None:
+                cut.finish()
+                sess.close()
 
     @staticmethod
-    def _read_stream(r, on_delta: Callable[[dict], None], should_stop: Callable[[], bool] | None) -> dict:
+    def _read_stream(r, on_delta: Callable[[dict], None], should_stop: Callable[[], bool] | None, cut: _Cut | None = None) -> dict:
         content: list[str] = []
         reasoning: list[str] = []
         calls: dict[int, dict] = {}
-        finish, usage, timings, stopped = None, {}, {}, False
-        # Stop pendant un long silence (prefill d'un gros contexte sur CPU) : un veilleur ferme la connexion sans attendre
-        # la prochaine ligne SSE ; llama-server arrete alors la generation.
-        halted = threading.Event()
-        if should_stop is not None:
-            def watch():
-                while not halted.is_set():
-                    if should_stop():
-                        halted.set(); _abort(r); return
-                    time.sleep(0.2)
-            threading.Thread(target=watch, daemon=True).start()
+        finish, usage, timings, done = None, {}, {}, False
+        # Stop pendant un long silence (prefill d'un gros contexte sur CPU) : le veilleur (_Cut) coupe la connexion sans
+        # attendre la prochaine ligne SSE ; llama-server arrete alors la generation.
+        halted = cut.halted if cut is not None else threading.Event()
+
+        def stop() -> bool:
+            return halted.is_set() or (should_stop is not None and should_stop())
         try:
+            stopped = stop()   # Stop deja demande a l'arrivee des en-tetes : rien a lire
             # llama-server diffuse en "chunked" : chunk_size=None rend chaque evenement SSE des son arrivee (512 par
             # defaut = rafales de tokens). Sans "chunked", None attendrait la fin du corps : lectures de 64 octets.
             chunked = "chunked" in r.headers.get("Transfer-Encoding", "").lower()
-            for raw in r.iter_lines(chunk_size=None if chunked else 64, decode_unicode=True):
-                if halted.is_set() or (should_stop is not None and should_stop()):
+            for raw in [] if stopped else r.iter_lines(chunk_size=None if chunked else 64, decode_unicode=True):
+                if stop():
                     stopped = True
                     break
                 if not raw or not raw.startswith("data:"):
                     continue
                 data = raw[5:].strip()
                 if data == "[DONE]":
+                    done = True
                     break
                 try:
                     chunk = json.loads(data)
@@ -396,12 +473,16 @@ class LlamaCppBackend:
                         if fn.get("arguments"):
                             cur["function"]["arguments"] += fn["arguments"]
                         on_delta({"type": "tool_call", "index": i, "name": cur["function"]["name"], "args_delta": fn.get("arguments") or ""})
+            # flux fini sans [DONE] ni fin de generation apres un Stop : le veilleur a coupe la connexion avant la premiere
+            # ligne et iter_lines s'est termine sans erreur ; c'est un arret, pas une reponse vide
+            stopped = stopped or (not done and finish is None and stop())
         except Exception:
-            if not halted.is_set():   # connexion fermee par le veilleur : c'est un arret demande, pas une panne
+            if not halted.is_set():   # connexion coupee par le veilleur : c'est un arret demande, pas une panne
                 raise
             stopped = True
         finally:
-            halted.set()
+            if cut is not None:
+                cut.finish()   # avant close : le veilleur ne touche plus la connexion
             r.close()
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:
