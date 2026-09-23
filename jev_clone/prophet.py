@@ -1128,7 +1128,7 @@ class Prophet:
         self._s1_ms, self._s1_calls = 0.0, 0
         self._emit({"type": "turn.start", "request": request, "plan_mode": self.plan_mode, "permission_mode": self.permission_mode, "effort": effort})
         files = self.ws.listing()["entries"]
-        # le classifieur lit ~2 k tokens par slot (4 slots sur 8 k) : on borne ce qu'on lui montre
+        # le classifieur lit ~8 k tokens par slot (contexte par slot garanti par le planificateur) : on borne ce qu'on lui montre
         recent = [{"role": m.get("role"), "content": _clip(m.get("content"), 400)} for m in history[-4:]]
         s1_ms = 0.0
         state = {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent}
@@ -1204,6 +1204,10 @@ class Prophet:
                     if c["name"] in ("browse", "desktop") and isinstance(r, dict):
                         try:
                             tool_s1 = (tool_s1[0] + float(r.get("s1_ms") or 0), tool_s1[1] + int(r.get("s1_calls") or 0))
+                            # generation de Bonsai dans l'outil ; tok_s et ctx_tokens restent ceux de la boucle du tour
+                            stats["llm_calls"] += int(r.get("s2_calls") or 0)
+                            stats["tokens"] += int(r.get("s2_tokens") or 0)
+                            stats["prompt_ms"] += float(r.get("s2_prompt_ms") or 0)
                         except (TypeError, ValueError):
                             pass
             summary = next((c["result"].get("summary") for s in reversed(res.steps) for c in s.tool_calls if c["name"] == "done" and isinstance(c["result"], dict)), None)

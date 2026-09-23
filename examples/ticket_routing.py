@@ -9,7 +9,7 @@ import os
 from jev_clone.backend_llamacpp import LlamaCppBackend
 from jev_clone.engine import SystemOneEngine
 from jev_clone.fusion import FusionRouter, GatePolicy
-from jev_clone.readout import Calibration
+from jev_clone.readout import load_calibration
 
 S1 = os.environ.get("JEV_S1_URL", "http://127.0.0.1:8081")
 S2 = os.environ.get("JEV_S2_URL")   # None = pas d'escalade (System One seul)
@@ -30,7 +30,7 @@ TICKETS = [
     "Do you have a discount if we move 40 seats to the annual plan?",
 ]
 
-engine = SystemOneEngine(LlamaCppBackend(S1), calibration=Calibration.load(os.environ.get("JEV_CALIBRATION")))
+engine = SystemOneEngine(LlamaCppBackend(S1), calibration=load_calibration(os.environ.get("JEV_CALIBRATION"), agent=False))
 router = FusionRouter(engine, LlamaCppBackend(S2, max_workers=1) if S2 else None,
                       GatePolicy(default_threshold=0.6, risk_question="frustration",
                                  always_escalate_if={"needs_human": True}),

@@ -195,6 +195,10 @@
           <button class="btn sm accent" onclick={() => app.startRuntime()} disabled={c.runtime.state === "starting" || ramShort} title={ramShort ? RAM_TITLE : undefined}>
             <Play size={14} /> Demarrer
           </button>
+          {#if c.runtime.state === "starting" || c.runtime.state === "error"}
+            <!-- un demarrage en cours (ou echoue) s'annule aussi : le serveur arrete le lancement et ceux en attente -->
+            <button class="btn sm ghost" onclick={() => app.stopRuntime()}><Power size={14} /> Arreter</button>
+          {/if}
         {/if}
       </div>
     </div>
@@ -258,8 +262,10 @@
               <b>{m.label}</b>{#each m.tags as t}<span class="chip {t === 'recommande' ? 's1' : ''}">{t}</span>{/each}{#if active}<span class="chip ok">actif</span>{/if}
               {#if role === "s1" && inst}
                 {@const cal = app.calibrations[m.id]}
-                {#if cal && !cal.error}
-                  <span class="chip ok" title="Temperature par primitive et seuils par question ({cal.source ?? '?'})">calibre{cal.n ? ` · ${cal.n} ex.` : ""}</span>
+                {#if cal && !cal.error && cal.stale_thresholds}
+                  <span class="chip warn" title={cal.warning ?? "Seuils calcules par une ancienne version : ignores (portes par defaut). Recalibrez ce classifieur."}>seuils a recalculer</span>
+                {:else if cal && !cal.error}
+                  <span class="chip ok" title="Temperature par question et seuils par decision ({cal.source ?? '?'})">calibre{cal.n ? ` · ${cal.n} ex.` : ""}</span>
                 {:else}
                   <span class="chip warn" title={cal?.error ?? "Pourcentages bruts : lancez Calibrer quand ce classifieur tourne, ou importez une calibration."}>non calibre</span>
                 {/if}

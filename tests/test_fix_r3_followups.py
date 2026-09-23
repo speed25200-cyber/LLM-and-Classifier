@@ -113,3 +113,17 @@ def test_stop_interrupts_a_silent_stream_without_waiting_for_a_token():
         assert time.time() - t0 < 5                                   # avant : attente de la premiere ligne (30 s ici)
     finally:
         srv.close()
+
+
+def test_turn_stats_include_bonsai_work_done_inside_desktop_and_browse_tools(tmp_path):
+    """Les appels de Bonsai faits dans l'outil (politique lente du computer use) comptent dans les stats du tour."""
+    from jev_clone.prophet import Prophet, Workspace
+    from tests.conftest import MockS2
+    from tests.test_fix_r1_guard import DONE, eng
+    run = {"ok": True, "status": "done", "steps": 3, "s1_ms": 42.0, "s1_calls": 5, "s2_calls": 2, "s2_tokens": 300, "s2_prompt_ms": 120.0}
+    s2 = MockS2([{"content": "", "tool_calls": [MockS2.tool_call("desktop", {"goal": "ouvre la calculatrice", "app": "calc"}, "c1")]}, DONE])
+    t = Prophet(eng(), s2, Workspace(tmp_path / "ws"), permission_mode="auto",
+                desktop_factory=lambda: (lambda goal, app, slots: dict(run))).handle("ouvre la calculatrice")
+    assert any(c["tool"] == "desktop" for c in t.tool_calls)
+    # le faux Bonsai des tests ne publie pas llm.end : seuls les appels faits dans l'outil sont comptes ici
+    assert t.stats["llm_calls"] == 2 and t.stats["tokens"] == 300 and t.stats["prompt_ms"] == 120.0 and t.stats["s1_calls"] >= 5

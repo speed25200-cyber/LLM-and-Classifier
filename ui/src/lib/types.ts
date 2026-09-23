@@ -351,6 +351,9 @@ export interface S1Calibration {
   thresholds?: Record<string, number | null>;
   report?: Record<string, { before: CalibrationReport; after: CalibrationReport }>;
   error?: string;
+  /** seuils d'une version precedente : ignores (portes par defaut), a recalculer */
+  stale_thresholds?: boolean;
+  warning?: string;
 }
 
 export interface S1CalibrationProgress {

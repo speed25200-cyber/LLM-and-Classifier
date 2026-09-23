@@ -150,9 +150,14 @@ def test_autostart_never_starts_a_cpu_plan_that_does_not_fit_in_ram(tmp_path, mo
             assert started == []                                        # avant : deux demarrages de plus
             assert c.post("/api/runtime/start", headers=H).status_code == 200   # « Lancer quand meme » : accord explicite
             assert until(lambda: started == [ids[0]], 5)
-        gpu_partial = replace(p, backend="cuda")                        # dechargement partiel GPU (fits False) : pas concerne
-        st.plan = lambda *a, **k: gpu_partial
+        # dechargement partiel GPU : un manque de VRAM seul (fits False) n'empeche pas le demarrage automatique,
+        # un manque de RAM (ram_short) si, comme pour un plan CPU
+        gpu_vram_only = replace(p, backend="cuda", ram_short=False)
+        st.plan = lambda *a, **k: gpu_vram_only
         assert st.may_autostart()
+        gpu_ram_short = replace(p, backend="cuda", ram_short=True)
+        st.plan = lambda *a, **k: gpu_ram_short
+        assert not st.may_autostart()
     finally:
         for k in ids:
             catalog.CUSTOM.pop(k, None)

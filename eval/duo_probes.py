@@ -33,7 +33,7 @@ from jev_clone.guard import JUDGE_QUESTIONS
 from jev_clone.presets import META
 from jev_clone.prompt import label_grammar
 from jev_clone.prophet import CORE_TOOLS, PROPHET_TURN, Prophet, Workspace
-from jev_clone.readout import Calibration
+from jev_clone.readout import load_calibration
 from jev_clone.schema import SystemOneRequest
 
 DIRECT_QUESTION = "Quelle est la capitale de l'Italie ? Reponds en un mot."
@@ -347,7 +347,7 @@ def run_turn_local(s1_url: str, s2_url: str, request: str, workspace: str | Path
                    agent: bool | None = None) -> dict:
     """Un tour Prophet en processus contre deux llama-server, permission_mode auto, flux d'evenements comme dans Studio.
     Memes reglages que prophet_studio.sessions.AgentService (max_tokens, compaction, 24 tours d'outils)."""
-    s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=300), calibration=Calibration.load(calibration))
+    s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=300), calibration=load_calibration(calibration, agent=True))
     s2 = LlamaCppBackend(s2_url, max_workers=1, timeout=timeout)
     ctx = max(4096, int(server_info(s2_url).get("n_ctx") or 8192))
     ws = Workspace(workspace)

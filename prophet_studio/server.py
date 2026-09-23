@@ -158,7 +158,7 @@ class Studio:
         """Un plan CPU qui ne tient pas en RAM n'est jamais lance sans accord (comme l'interface) : le demarrage automatique
         (lancement de l'application, fin d'installation) est suspendu et le dit ; seul un demarrage explicite le lance."""
         p = self.plan()
-        if p.backend == "cpu" and p.rung == 0 and not p.fits:
+        if p.rung == 0 and (getattr(p, "ram_short", False) or (p.backend == "cpu" and not p.fits)):   # GPU partiel compris
             self.runtime.note("RAM insuffisante pour ce plan : demarrage automatique suspendu "
                               "(« Lancer quand meme » dans l'ecran Modeles, ou un modele plus petit)")
             return False
