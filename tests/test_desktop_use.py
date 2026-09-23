@@ -12,6 +12,9 @@ from jev_clone.tools import SystemOneToolbox
 from tests.conftest import MockS2, ScriptedBackend
 
 A = list(ACTIONS)
+TR = ["readonly", "destructive", "privileged", "exfiltration"]
+# garde-fou du pas (clic / saisie / raccourci / lancement juges avant execution) : pas sur
+SAFE = {"tool_risk": [0.9, 0.04, 0.03, 0.03], "risk": [0.9, 0.06, 0.02, 0.02], "policy_violation": [0.05, 0.95]}
 
 
 def test_keys_to_sendkeys():
@@ -42,13 +45,16 @@ def test_walk_uia_tree_to_page_state():
 
 
 def plan(steps):
-    """Tables S1 : pour chaque pas (action, cible) une decision puis une verification reussie."""
+    """Tables S1 : pour chaque pas (action, cible) une decision, le garde-fou du pas puis une verification reussie ;
+    "done" est confirme par le noul objectif atteint."""
     tables = []
     for action, target in steps:
         t = {"action": [0.9 if a == action else 0.02 for a in A]}
         if target is not None:
             t[f"t{target}"] = [0.95, 0.05]
-        tables += [t, {"ok": [0.9, 0.1]}]
+        if action == "done":
+            t["achieved"] = [0.9, 0.1]
+        tables += [t, SAFE, {"ok": [0.9, 0.1]}] if action in ("click", "type") else [t, {"ok": [0.9, 0.1]}]
     return tables
 
 
@@ -56,7 +62,7 @@ def test_fast_policy_drives_simulated_calculator():
     desk = SimulatedDesktop()
     # boutons de la calculatrice : 7 8 9 4 5 6 1 2 3 0 + - x / Egal Effacer -> indices 0..15
     s1 = SystemOneEngine(ScriptedBackend(plan([("click", 6), ("click", 10), ("click", 4), ("click", 14), ("done", None)]),
-                                         declared={"action": A}, default_noul=(0.2, 0.8)), model_name="mock")
+                                         declared={"action": A, "tool_risk": TR}, default_noul=(0.2, 0.8)), model_name="mock")
     session = DesktopSession(desk)
     out = ComputerUseAgent(session, FastPolicy(s1), None, max_steps=8, ledger=None).run("calcule 1 + 5")
     assert out["status"] == "done" and desk.display == "6"
@@ -66,7 +72,8 @@ def test_fast_policy_drives_simulated_calculator():
 
 def test_escalation_to_bonsai_with_desktop_tools():
     desk = SimulatedDesktop()
-    s1 = SystemOneEngine(ScriptedBackend([{"action": [0.02, 0.02, 0.02, 0.02, 0.02, 0.9]}], declared={"action": A}), model_name="mock")
+    s1 = SystemOneEngine(ScriptedBackend([{"action": [0.02, 0.02, 0.02, 0.02, 0.02, 0.9]}, SAFE], declared={"action": A, "tool_risk": TR}),
+                         model_name="mock")
     s2 = MockS2([
         {"content": "", "tool_calls": [MockS2.tool_call("open_app", {"name": "notepad"})]},
         {"content": "", "tool_calls": [MockS2.tool_call("type", {"index": 0, "text": "Liste de courses"}, "c2")]},

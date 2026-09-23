@@ -16,6 +16,9 @@ HTML = """<html><body><h1>Newsletter</h1>
 <div id="out"></div></body></html>"""
 
 A = list(ACTIONS)  # ordre declare : click, type, scroll_down, go_back, done, escalate
+TR = ["readonly", "destructive", "privileged", "exfiltration"]
+# garde-fou du pas (clic / saisie juges avant execution) : pas sur
+SAFE = {"tool_risk": [0.9, 0.04, 0.03, 0.03], "risk": [0.9, 0.06, 0.02, 0.02], "policy_violation": [0.05, 0.95]}
 
 
 @pytest.fixture(scope="module")
@@ -45,6 +48,8 @@ def _probs(action, target=None, slot=None):
         t[f"t{target}"] = [0.95, 0.05]
     if slot:
         t["slot"] = [0.9, 0.1]  # declared ["email", "none"]
+    if action == "done":
+        t["achieved"] = [0.9, 0.1]  # "done" doit etre confirme par le noul objectif atteint
     return t
 
 
@@ -60,10 +65,10 @@ def test_observe(session):
 
 def test_fast_policy_type_then_click_then_done(session, tmp_path):
     session.set_content(HTML)
-    be = ScriptedBackend([_probs("type", target=1, slot="email"), {"ok": [0.9, 0.1]},
-                          _probs("click", target=2), {"ok": [0.9, 0.1]},
+    be = ScriptedBackend([_probs("type", target=1, slot="email"), SAFE, {"ok": [0.9, 0.1]},
+                          _probs("click", target=2), SAFE, {"ok": [0.9, 0.1]},
                           _probs("done")],
-                         declared={"action": A, "slot": ["email", "none"]})
+                         declared={"action": A, "slot": ["email", "none"], "tool_risk": TR})
     fast = FastPolicy(SystemOneEngine(be, model_name="mock"))
     agent = ComputerUseAgent(session, fast, slow=None, max_steps=5, ledger=tmp_path / "traj.jsonl")
     out = agent.run("Subscribe to the newsletter with my email", slots={"email": "ana@example.com"})
@@ -79,7 +84,7 @@ def test_fast_policy_type_then_click_then_done(session, tmp_path):
 
 def test_escalation_to_slow_policy(session, tmp_path):
     session.set_content(HTML)
-    be = ScriptedBackend([_probs("escalate")], declared={"action": A})
+    be = ScriptedBackend([_probs("escalate"), SAFE], declared={"action": A, "tool_risk": TR})   # puis garde-fou des actions de Bonsai
     fast = FastPolicy(SystemOneEngine(be, model_name="mock"))
     s2 = MockS2([
         {"content": "", "tool_calls": [MockS2.tool_call("type", {"index": 1, "text": "bob@example.com"}),

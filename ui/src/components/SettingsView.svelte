@@ -6,6 +6,10 @@
   let { onTheme, theme }: { onTheme: () => void; theme: string } = $props();
   const s = $derived(app.core!.settings);
   const voices = $derived(app.core!.catalog.voice);
+  // computer use : disponibilite reelle (Playwright + Chromium, Windows pour le bureau) ; ancien coeur sans ce champ = disponible
+  const browserOk = $derived(app.core!.browser?.available ?? true);
+  const desktopOk = $derived(app.core!.desktop?.available ?? false);
+  const STEP_NOTE = "Chaque clic, saisie, raccourci ou lancement est juge par le classifieur avant execution ; un pas juge risque vous est demande (sauf autorisations « Jamais »).";
 
   function set(patch: Partial<Settings> | Record<string, unknown>) {
     app.updateSettings(patch);
@@ -21,8 +25,8 @@
   }
 </script>
 
-{#snippet toggle(on: boolean, onchange: () => void, label: string, desc: string)}
-  <button class="row tog" onclick={onchange} role="switch" aria-checked={on}>
+{#snippet toggle(on: boolean, onchange: () => void, label: string, desc: string, disabled = false)}
+  <button class="row tog" onclick={onchange} role="switch" aria-checked={on} {disabled}>
     <div class="lab"><b>{label}</b><span>{desc}</span></div>
     <span class="switch" class:on></span>
   </button>
@@ -59,10 +63,13 @@
         {#each [["auto", "Auto"], ["fast", "Rapide"], ["deep", "Profond"]] as [k, l] (k)}<button class:on={s.effort === k} onclick={() => set({ effort: k })}>{l}</button>{/each}
       </div>
     </div>
-    {@render toggle(s.browser_tool, () => set({ browser_tool: !s.browser_tool }), "Outil navigateur (computer use)", "Bonsai pilote un navigateur, le classifieur decide chaque pas (Playwright requis).")}
+    <!-- indisponible : on ne peut pas activer (mais on peut toujours desactiver un reglage deja actif) -->
+    {@render toggle(s.browser_tool, () => set({ browser_tool: !s.browser_tool }), "Outil navigateur (computer use)",
+      browserOk ? `Prophet pilote un navigateur : le classifieur decide les pas simples, Bonsai reprend en cas de doute. ${STEP_NOTE}`
+        : `Indisponible ici : ${app.core!.browser?.reason ?? "Playwright et Chromium requis"}`, !browserOk && !s.browser_tool)}
     {@render toggle(s.desktop_tool, () => set({ desktop_tool: !s.desktop_tool }), "Controle du bureau (computer use)",
-      app.core!.desktop?.available ? "Prophet pilote vos applications (clics, saisie, raccourcis) ; le classifieur decide chaque pas, chaque action est jugee avant execution."
-        : `Indisponible ici : ${app.core!.desktop?.reason ?? ""}`)}
+      desktopOk ? `Prophet pilote vos applications (clics, saisie, raccourcis) : le classifieur decide les pas simples, Bonsai reprend en cas de doute. ${STEP_NOTE}`
+        : `Indisponible ici : ${app.core!.desktop?.reason ?? ""}`, !desktopOk && !s.desktop_tool)}
   </section>
 
   <section class="card rise">
@@ -129,7 +136,8 @@
   .lab { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .lab b { font-size: 13.5px; font-weight: 580; }
   .lab span { font-size: 12.5px; color: var(--text-3); line-height: 1.45; overflow-wrap: anywhere; }
-  .tog:hover .switch:not(.on) { background: var(--line-3); }
+  .tog:not(:disabled):hover .switch:not(.on) { background: var(--line-3); }
+  .tog:disabled { opacity: 0.55; cursor: not-allowed; }
   .ports { display: flex; gap: 8px; width: 220px; }
   input[type="range"] { width: 220px; accent-color: var(--s2); }
   .panel-title { margin-bottom: 4px; }

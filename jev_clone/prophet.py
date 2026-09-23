@@ -544,17 +544,25 @@ class Prophet:
                                ensure_ascii=False, default=str) + "\n")
 
 
-def make_browser_factory(s1_engine, s2_backend, headless: bool = True):
-    """Fabrique l'outil `browse` : agent navigateur a deux vitesses (computer_use) partageant les deux modeles."""
+def make_browser_factory(s1_engine, s2_backend, headless: bool = True, confirm: Callable[[str, dict], bool] | None = None,
+                         on_event: Callable[[dict], None] | None = None, should_stop: Callable[[], bool] | None = None,
+                         ledger: str | Path | None = "runs/trajectories.jsonl", max_steps: int = 20):
+    """Fabrique l'outil `browse` : agent navigateur a deux vitesses (computer_use) partageant les deux modeles.
+    confirm : autorisation des pas risques (sans elle, ils sont refuses) ; on_event / should_stop : progression par pas et
+    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py)."""
     def factory():
-        from jev_clone.computer_use import BrowserSession, ComputerUseAgent, FastPolicy, SlowPolicy
+        from jev_clone.computer_use import BrowserSession, ComputerUseAgent, FastPolicy, SlowPolicy, browser_available, run_result
         def run(goal, url=None, slots=None):
+            ok, why = browser_available()
+            if not ok:   # erreur explicite pour Bonsai plutot qu'un ModuleNotFoundError
+                return {"ok": False, "error": f"browser unavailable: {why}"}
             session = BrowserSession(headless=headless)
             try:
-                agent = ComputerUseAgent(session, FastPolicy(s1_engine), SlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine)), max_steps=20)
+                agent = ComputerUseAgent(session, FastPolicy(s1_engine), SlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine)), max_steps=max_steps,
+                                         ledger=ledger, confirm=confirm, on_event=on_event, should_stop=should_stop, kind="browse")
                 out = agent.run(goal, url=url, slots=slots or {})
                 final = session.observe()
-                return {"ok": out["status"] == "done", "status": out["status"], "steps": out["steps"], "url": final.url, "title": final.title, "page": final.aria[:3000]}
+                return {**run_result(out), "url": final.url, "title": final.title, "page": final.aria[:3000]}
             finally:
                 session.close()
         return run

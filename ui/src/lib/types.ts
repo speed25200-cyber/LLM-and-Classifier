@@ -309,3 +309,8 @@ export interface VoiceRoute {
   source: string;
   ms: number;
 }
+
+// ---- computer use : disponibilite de l'outil navigateur (Playwright + Chromium), exposee par /api/state ----
+export interface CoreState {
+  browser?: { available: boolean; reason: string };
+}

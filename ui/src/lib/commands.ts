@@ -49,6 +49,14 @@ export async function runVoiceCommand(cmd: string) {
       else app.toast("info", "Aucune action en attente d'autorisation");
       return;
     }
+    case "confirm_approve":
+    case "confirm_deny": {
+      // le classifieur (et non la grammaire exacte) a compris une reponse a l'autorisation : on n'agit pas, on demande la phrase exacte
+      const word = cmd === "confirm_approve" ? "accepte" : "refuse";
+      if (app.pendingPermission) app.toast("warn", "Confirmation vocale requise", `Dites exactement « ${word} » ou utilisez les boutons de la demande.`);
+      else app.toast("info", "Aucune action en attente d'autorisation");
+      return;
+    }
     case "send":
       if (app.composerText.trim()) {
         const t = app.composerText;
