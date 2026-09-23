@@ -512,12 +512,10 @@ def test_ui_shows_computer_progress_live_and_reloaded_unclipped_grants_and_unava
         assert "Debit de la voix · 1,00x" in text
 
 
-def test_ui_models_reset_a_removed_choice_warn_clearly_and_show_the_bench_series(tmp_path, monkeypatch, ui_web):
+def test_ui_models_reset_a_removed_choice_warn_clearly_and_show_the_bench_series(tmp_path, monkeypatch, ui_web, big_gguf):
     brain, clone = tmp_path / "my-brain.gguf", tmp_path / "gone" / "my-clone.gguf"
-    clone.parent.mkdir()
-    for f in (brain, clone):   # fichiers creux de 1 Gio (un GGUF de quelques octets fait diviser le planificateur par zero)
-        with open(f, "wb") as fh:
-            fh.truncate(2**30)
+    for f in (brain, clone):   # 1 Gio simules (petits fichiers : taille vue par le planificateur)
+        big_gguf(f, 2**30)
     ids = {}
 
     def prepare(st):
@@ -549,13 +547,12 @@ def test_ui_models_reset_a_removed_choice_warn_clearly_and_show_the_bench_series
         assert wait_until(lambda: page.locator(".warnbox", has_text="non applique").count() == 0)
 
 
-def test_ui_a_cpu_plan_that_does_not_fit_in_ram_is_never_started_blindly(tmp_path, monkeypatch, ui_web):
+def test_ui_a_cpu_plan_that_does_not_fit_in_ram_is_never_started_blindly(tmp_path, monkeypatch, ui_web, big_gguf):
     huge = tmp_path / "huge-brain.gguf"
     ids = {}
 
     def prepare(st):
-        with open(huge, "wb") as f:   # fichier creux, 4 x la RAM de la machine
-            f.truncate(int(st.hw.ram_total_gib * 4 * 2**30))
+        big_gguf(huge, int(st.hw.ram_total_gib * 4 * 2**30))   # 4 x la RAM de la machine (taille simulee)
         ids["s2"] = st.installer.import_gguf(str(huge), "s2")
         st.settings.update({"s2_model": ids["s2"]})
     with studio_page(tmp_path, monkeypatch, ui_web, gpu="NVIDIA GeForce GT 710:2048:14", prepare=prepare) as (st, page):

@@ -82,9 +82,15 @@ CUSTOM_OVERHEAD_GIB = {"s1": 0.4, "s2": 1.2}
 CUSTOM: dict[str, ModelSpec] = {}    # tenu a jour par l'installateur depuis son registre (installed.json)
 
 
+def gguf_size(p: Path) -> int:
+    """Taille d'un GGUF importe, d'ou le planificateur estime la memoire (point unique : simule dans les tests, qui n'ecrivent
+    pas de fichier de plusieurs Go ; sous Windows un fichier "creux" occupe vraiment le disque)."""
+    return p.stat().st_size
+
+
 def custom_spec(model_id: str, role: str, path: str | Path, label: str = "") -> ModelSpec:
     p = Path(path)
-    gib = max(p.stat().st_size / 2**30, 1 / 1024)   # plancher 1 Mio : un fichier minuscule ne donne jamais 0 (divisions)
+    gib = max(gguf_size(p) / 2**30, 1 / 1024)   # plancher 1 Mio : un fichier minuscule ne donne jamais 0 (divisions)
     return ModelSpec(model_id, role, label or p.stem, "", p.name, round(gib * 1.0737, 2), weights_gib=gib,
                      kv_kib_f16=CUSTOM_KV_KIB.get(role, 256.0), overhead_gib=CUSTOM_OVERHEAD_GIB.get(role, 1.2), runtime="any",
                      thinking=role == "s2", note="GGUF importe : memoire estimee depuis la taille du fichier (KV et surcout majores).",

@@ -123,12 +123,10 @@ class Chat:
 
 
 # ---- plan CPU hors RAM : jamais demarre automatiquement (lancement, fin d'installation), seulement sur accord explicite -------
-def test_autostart_never_starts_a_cpu_plan_that_does_not_fit_in_ram(tmp_path, monkeypatch):
+def test_autostart_never_starts_a_cpu_plan_that_does_not_fit_in_ram(tmp_path, monkeypatch, big_gguf):
     st = studio(tmp_path, monkeypatch, gpu="NVIDIA GeForce GT 710:2048:14", onboarding_done=True)   # autostart : defaut
     assert st.settings.get().autostart_models
-    huge = tmp_path / "huge-brain.gguf"
-    with open(huge, "wb") as f:
-        f.truncate(int(st.hw.ram_total_gib * 4 * 2**30))              # fichier creux : 4 x la RAM
+    huge = big_gguf(tmp_path / "huge-brain.gguf", int(st.hw.ram_total_gib * 4 * 2**30))   # 4 x la RAM (taille simulee)
     started: list = []
     st.runtime.start = lambda plan, ports, **kw: started.append(plan.s2.model_id) or True
     ids = []

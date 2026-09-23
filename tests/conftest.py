@@ -105,3 +105,22 @@ class MockS2:
         self.calls.append((list(messages), kw))
         msg = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
         return {"choices": [{"message": {"role": "assistant", **msg}}]}
+
+
+@pytest.fixture
+def big_gguf(monkeypatch):
+    """GGUF de grande taille simulee : petit fichier sur le disque, taille vue par le planificateur (catalog.gguf_size). Un
+    fichier creux (truncate) occuperait vraiment des dizaines de Go sur le runner Windows."""
+    from pathlib import Path
+    from prophet_studio import catalog
+    sizes: dict[str, int] = {}
+    real = catalog.gguf_size
+    monkeypatch.setattr(catalog, "gguf_size", lambda p: sizes.get(str(Path(p).resolve()), None) or real(Path(p)))
+
+    def make(path, size: int):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"GGUF" + b"\0" * 60)
+        sizes[str(path.resolve())] = int(size)
+        return path
+    return make

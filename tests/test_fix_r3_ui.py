@@ -136,13 +136,11 @@ def test_a_step_permission_describes_the_action_in_french():
 
 # ---- 5. RAM des plans GPU ------------------------------------------------------------------------------------------------------
 @pytest.fixture
-def sparse(tmp_path):
+def sparse(tmp_path, big_gguf):
     saved = dict(CUSTOM)
 
     def make(mid, role, gib):
-        f = tmp_path / f"{mid}.gguf"
-        with open(f, "wb") as h:   # fichier creux : la taille seule compte pour le planificateur
-            h.truncate(int(gib * 2**30))
+        f = big_gguf(tmp_path / f"{mid}.gguf", int(gib * 2**30))   # la taille seule compte pour le planificateur (simulee)
         CUSTOM[mid] = custom_spec(mid, role, f)
         return mid
     yield make
@@ -395,15 +393,14 @@ def test_ui_cards_speak_french_without_a_shell_prompt_and_settings_name_the_sele
     assert not bad, bad
 
 
-def test_ui_gpu_plans_short_of_ram_are_never_applied_blindly_and_install_errors_are_french(tmp_path, monkeypatch, ui_web):
+def test_ui_gpu_plans_short_of_ram_are_never_applied_blindly_and_install_errors_are_french(tmp_path, monkeypatch, ui_web, big_gguf):
     huge, mid = tmp_path / "huge-brain.gguf", tmp_path / "mid-brain.gguf"
     ids = {}
 
     def prepare(st):
         st.hw.ram_total_gib = 16.0
         for f, gib in ((huge, 40), (mid, 10)):
-            with open(f, "wb") as h:   # fichiers creux
-                h.truncate(gib * 2**30)
+            big_gguf(f, gib * 2**30)   # tailles simulees (un fichier creux de 40 Go remplirait le disque sous Windows)
         ids["huge"] = st.installer.import_gguf(str(huge), "s2")
         ids["mid"] = st.installer.import_gguf(str(mid), "s2")
 
