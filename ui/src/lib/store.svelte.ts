@@ -2,6 +2,7 @@
 import { api, ApiError, bootFromPage, bootFromTauri, connectEvents, isTauri } from "./api";
 import { newAssistant, reduce } from "./transcript";
 import type { AssistantItem, CoreState, DownloadJob, Effort, GpuMetrics, PermissionMode, Session, Settings, VoiceRoute } from "./types";
+import { fixed } from "./format";
 
 export type View = "chat" | "models" | "settings";
 export interface Toast {
@@ -153,7 +154,7 @@ class AppState {
         this.toast("warn", "Configuration ajustee automatiquement", e.note);
         return;
       case "runtime.calibrated":
-        this.toast("info", "VRAM calibree sur votre carte", `${e.model} : ${(e.used_mib / 1024).toFixed(2)} Gio mesures ; le prochain plan en tiendra compte.`);
+        this.toast("info", "VRAM calibree sur votre carte", `${e.model} : ${fixed(e.used_mib / 1024, 2)} Gio mesures ; le prochain plan en tiendra compte.`);
         this.refreshSoon();
         return;
       case "download.progress": {
@@ -387,7 +388,7 @@ class AppState {
     try {
       const r = await api<{ model_id: string; n: number; report?: Record<string, { before: { ece: number }; after: { ece: number } }> }>("/api/calibrate", { body: {} });
       const nl = r.report?.noul;
-      this.toast("ok", "Classifieur calibre", `${r.model_id} · ${r.n} exemples${nl ? ` · ECE oui/non ${nl.before.ece.toFixed(3)} -> ${nl.after.ece.toFixed(3)}` : ""}`, 7000);
+      this.toast("ok", "Classifieur calibre", `${r.model_id} · ${r.n} exemples${nl ? ` · ECE oui/non ${fixed(nl.before.ece, 3)} -> ${fixed(nl.after.ece, 3)}` : ""}`, 7000);
       this.refreshSoon();
     } catch (e) {
       this.toast("error", "Calibration impossible", e instanceof ApiError ? e.message : String(e), 8000);

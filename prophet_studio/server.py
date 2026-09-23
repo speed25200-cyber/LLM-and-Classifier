@@ -385,7 +385,12 @@ def build_app(studio: Studio) -> FastAPI:
     def remove(item_id: str):
         if not studio.installer.remove(item_id):
             raise HTTPException(404, "introuvable")
-        return {"ok": True}
+        # un modele impose dans les reglages et supprime : retour au choix automatique (pour tout client, pas que l'UI)
+        st = studio.settings.get()
+        reset = {k: "auto" for k in ("s2_model", "s1_model") if getattr(st, k) == item_id}
+        if reset:
+            studio.settings.update(reset)
+        return {"ok": True, "reset": sorted(reset)}
 
     @app.post("/api/import")
     async def import_gguf(request: Request):

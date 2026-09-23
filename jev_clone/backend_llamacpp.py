@@ -22,6 +22,8 @@ from __future__ import annotations
 import concurrent.futures as cf
 import json
 import logging
+import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -49,6 +51,19 @@ def raise_for_status(r: requests.Response) -> None:
     msg = " ".join(str(msg).split())[:400]
     log.warning("llama-server %s sur %s : %s", r.status_code, r.url, msg)
     raise requests.HTTPError(f"llama-server {r.status_code} : {msg}", response=r)
+
+
+def _abort(r) -> None:
+    """Coupe une reponse en flux depuis un autre fil : fermer la reponse ne debloque pas une lecture en attente sur la
+    socket (urllib3), on la ferme donc au niveau du systeme (shutdown), puis on libere la reponse."""
+    try:
+        r.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        r.close()
+    except Exception:
+        pass
 
 
 @dataclass
@@ -319,6 +334,8 @@ class LlamaCppBackend:
                 msg = r.text
             if r.status_code in (400, 500) and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
                 payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
+                if payload.get("thinking_budget_tokens"):   # la reflexion ne doit pas avaler toute la reponse reduite
+                    payload["thinking_budget_tokens"] = min(payload["thinking_budget_tokens"], int(payload["max_tokens"] * 0.6))
                 continue
             raise_for_status(r)
         raise_for_status(r)
@@ -330,12 +347,22 @@ class LlamaCppBackend:
         reasoning: list[str] = []
         calls: dict[int, dict] = {}
         finish, usage, timings, stopped = None, {}, {}, False
+        # Stop pendant un long silence (prefill d'un gros contexte sur CPU) : un veilleur ferme la connexion sans attendre
+        # la prochaine ligne SSE ; llama-server arrete alors la generation.
+        halted = threading.Event()
+        if should_stop is not None:
+            def watch():
+                while not halted.is_set():
+                    if should_stop():
+                        halted.set(); _abort(r); return
+                    time.sleep(0.2)
+            threading.Thread(target=watch, daemon=True).start()
         try:
             # llama-server diffuse en "chunked" : chunk_size=None rend chaque evenement SSE des son arrivee (512 par
             # defaut = rafales de tokens). Sans "chunked", None attendrait la fin du corps : lectures de 64 octets.
             chunked = "chunked" in r.headers.get("Transfer-Encoding", "").lower()
             for raw in r.iter_lines(chunk_size=None if chunked else 64, decode_unicode=True):
-                if should_stop is not None and should_stop():
+                if halted.is_set() or (should_stop is not None and should_stop()):
                     stopped = True
                     break
                 if not raw or not raw.startswith("data:"):
@@ -369,7 +396,12 @@ class LlamaCppBackend:
                         if fn.get("arguments"):
                             cur["function"]["arguments"] += fn["arguments"]
                         on_delta({"type": "tool_call", "index": i, "name": cur["function"]["name"], "args_delta": fn.get("arguments") or ""})
+        except Exception:
+            if not halted.is_set():   # connexion fermee par le veilleur : c'est un arret demande, pas une panne
+                raise
+            stopped = True
         finally:
+            halted.set()
             r.close()
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:

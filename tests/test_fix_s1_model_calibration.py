@@ -117,8 +117,10 @@ def test_installer_registers_imported_gguf_and_studio_plans_with_it(tmp_path, mo
         assert mid not in c.get("/api/state", headers=H).json()["installed"]["calibration"]
         assert c.delete(f"/api/installed/{mid}", headers=H).status_code == 200
         assert mid not in CUSTOM and all(m["id"] != mid for m in catalog_dict()["models"]) and gguf.exists()
+        # le reglage qui imposait ce GGUF revient a "auto" (plus d'avertissement "introuvable" fantome)
+        assert c.get("/api/state", headers=H).json()["settings"]["s1_model"] == "auto"
         p = c.get("/api/plan", headers=H).json()
-        assert p["s1"]["model_id"] == "ternary-1.7b" and any("introuvable" in n for n in p["notes"])
+        assert p["s1"]["model_id"] == "ternary-1.7b" and not any("introuvable" in n for n in p["notes"])
 
 
 def test_demo_does_not_clobber_an_imported_model(tmp_path, monkeypatch):

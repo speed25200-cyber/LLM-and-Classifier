@@ -226,7 +226,7 @@ class TorchSystemOneEngine:
             per_q: dict[str, list[tuple[Branch, np.ndarray]]] = {}
             for b, row in zip(branches, logits):
                 per_q.setdefault(b.qid, []).append((b, self.restrict(row, b).cpu().numpy()))
-            answers = {qid: to_answer(q.type, merge_branches(q.type, per_q[qid], self.cal), q) for qid, q in req.questions.items()}
+            answers = {qid: to_answer(q.type, merge_branches(q.type, per_q[qid], self.cal, qid, q, req.state), q) for qid, q in req.questions.items()}
             q_tokens = sum(len(b) for b in branch_ids)
             return SystemOneResponse(answers=answers, model=self.model_name,
                                      usage=Usage(input_tokens=len(entry.ids) + q_tokens, state_tokens=len(entry.ids),

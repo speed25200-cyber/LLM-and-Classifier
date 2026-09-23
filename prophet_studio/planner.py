@@ -91,11 +91,18 @@ def s1_mib(m: ModelSpec, np: int = 1) -> dict:
     return {"s1_weights": _gib(m.weights_gib), "s1_runtime": _overhead_mib(m), "s1_kv": kv_mib(m, S1_CTX * np, S1_KV)}
 
 
+def _fr(x: float, d: int = 1) -> str:
+    """Nombre a la francaise pour les notes affichees (virgule decimale)."""
+    return f"{x:.{d}f}".replace(".", ",")
+
+
 def expected_speed(g: GPU | None, m: ModelSpec, device: str) -> dict:
     """Debit de generation estime : bande passante / taille des poids x efficacite observee (docs/03)."""
     if g is None or device == "cpu" or not g.bandwidth_gbs:
         return {"tok_s": None, "basis": "CPU : a mesurer (bench)"}
     gb = m.weights_gib * 1.0737  # Gio -> Go
+    if gb <= 0:
+        return {"tok_s": None, "basis": "taille des poids inconnue : a mesurer (bench)"}
     lo, hi = (0.45, 0.55) if m.id.endswith("-q1") else (0.62, 0.78)   # 1-bit : noyaux moins amortis (docs/03)
     if device == "partial":
         lo, hi = lo * 0.4, hi * 0.6
@@ -112,7 +119,7 @@ def _model_notes(s2_override: str, s1_override: str, s2m: ModelSpec, s1m: ModelS
     """Un choix impose qui n'est pas applique (fichier deplace, id inconnu) ne doit jamais passer en silence."""
     notes = [f"{what} impose '{o}' introuvable (GGUF deplace ou supprime ?) : choix automatique a la place."
              for what, o in (("Cerveau", s2_override), ("Classifieur", s1_override)) if o and o != "auto" and get_model(o) is None]
-    notes += [f"{m.label} : GGUF importe, memoire estimee depuis la taille du fichier ({m.weights_gib:.2f} Gio, KV et surcout majores)."
+    notes += [f"{m.label} : GGUF importe, memoire estimee depuis la taille du fichier ({_fr(m.weights_gib)} Gio, KV et surcout majores)."
               for m in (s2m, s1m) if m is not None and m.custom]
     return notes
 
@@ -157,9 +164,12 @@ def cpu_plan(hw: HardwareInfo, priority: str, s2_override: str = "auto", s1_over
              "Les deux modeles vivent en RAM ; comptez ~15-20 tok/s pour le 8B 1-bit sur 8 coeurs AVX2.",
              "Classifieur sur CPU (un slot) : ~0,15-0,4 s par decision une fois l'etat lu, plus le prefill d'un etat neuf (estimation).",
              *_model_notes(s2_override, s1_override, s2m, s1m)]
-    if s2m.id != "bonsai-8b-q1":
+    if s2m.id in MODELS and s2m.params_b >= 20:
         notes.append("27B sur CPU : puissant mais lent (~3-6 tok/s) ; la priorite 'vitesse' repasse au 8B.")
     need = (s2m.weights_gib + s2m.overhead_gib + s1m.weights_gib + s1m.overhead_gib) * 1024 + kv_mib(s2m, ctx) + kv_mib(s1m, S1_CTX, S1_KV)
+    if need >= ram * 1024 * 0.85:
+        notes.append(f"RAM insuffisante : ~{_fr(need / 1024)} Gio necessaires pour {_fr(ram)} Gio installes ; "
+                     "choisissez un modele plus petit (Bonsai 8B) ou fermez des applications.")
     return Plan("cpu", priority, ServerPlan("s2", s2m.id, "cpu", 0, ctx, 1, "q8_0", "off", 1024, threads),
                 ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS_CPU, S1_KV, threads=threads),
                 {"ram_needed_mib": round(need), "ram_total_mib": round(ram * 1024)}, need < ram * 1024 * 0.85,

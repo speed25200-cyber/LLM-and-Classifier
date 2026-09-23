@@ -84,8 +84,8 @@ CUSTOM: dict[str, ModelSpec] = {}    # tenu a jour par l'installateur depuis son
 
 def custom_spec(model_id: str, role: str, path: str | Path, label: str = "") -> ModelSpec:
     p = Path(path)
-    gib = p.stat().st_size / 2**30
-    return ModelSpec(model_id, role, label or p.stem, "", p.name, round(gib * 1.0737, 2), weights_gib=round(gib, 4),
+    gib = max(p.stat().st_size / 2**30, 1 / 1024)   # plancher 1 Mio : un fichier minuscule ne donne jamais 0 (divisions)
+    return ModelSpec(model_id, role, label or p.stem, "", p.name, round(gib * 1.0737, 2), weights_gib=gib,
                      kv_kib_f16=CUSTOM_KV_KIB.get(role, 256.0), overhead_gib=CUSTOM_OVERHEAD_GIB.get(role, 1.2), runtime="any",
                      thinking=role == "s2", note="GGUF importe : memoire estimee depuis la taille du fichier (KV et surcout majores).",
                      tags=["personnel"], custom=True, path=str(p))
