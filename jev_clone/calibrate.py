@@ -11,7 +11,9 @@ etiquetees : le format des graines livrees (jev_clone/seeds/prophet_seeds.jsonl,
 RLCD-lite : Jev est entraine par "Reinforcement Learning for Calibrated Decisions" avec une regle de
 score propre (log / Brier). Quand la sortie du modele EST la distribution, l'esperance de la recompense
 est differentiable : l'objectif RL se reduit a minimiser NLL ou Brier (voir training/). Ici on n'ajuste
-qu'une temperature par primitive, ce qui suffit souvent a rendre les pourcentages "honnetes".
+qu'une temperature par question etiquetee, ce qui suffit souvent a rendre les pourcentages "honnetes". Elle ne vaut que
+pour cette question (empreinte : type, consigne, options) lue sur un etat de meme forme : le garde-fou, la voix ou le
+computer use, jamais etiquetes ici, restent lus bruts (T = 1) et gardent le sens de leurs seuils fixes.
 Les seuils par question sont calcules APRES la temperature, sur la statistique de la porte (fusion.gate_statistic :
 probabilite de l'option retenue) ; une question qu'aucun seuil ne rend assez precise recoit `null` : toujours escalader.
 """
@@ -28,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from jev_clone.fusion import gate_statistic
-from jev_clone.readout import Calibration, probs_to_logits, softmax
+from jev_clone.readout import Calibration, probs_to_logits, question_fingerprint, softmax, state_keys
 
 SEEDS = Path(__file__).parent / "seeds" / "prophet_seeds.jsonl"   # graines etiquetees de Prophet, livrees avec le paquet
 
@@ -99,14 +101,23 @@ def fit_temperature(logits: np.ndarray, labels: np.ndarray, grid=None) -> float:
 
 def threshold_for_precision(conf: np.ndarray, correct: np.ndarray, target: float = 0.95) -> float | None:
     """Plus petit seuil de confiance tel que la precision des cas au-dessus du seuil >= target.
-    Sert de "porte" (gate) : au-dessus -> System One agit seul, en dessous -> escalade vers Bonsai."""
-    order = np.argsort(-conf)
-    c, ok = conf[order], correct[order]
+    Sert de "porte" (gate) : au-dessus -> System One agit seul, en dessous -> escalade vers Bonsai.
+    Les ex aequo passent ensemble la porte : la precision n'est evaluee qu'en fin de groupe (a la resolution des reponses,
+    6 decimales), et le seuil rendu admet exactement l'ensemble evalue (arrondi lisible seulement s'il n'en ajoute aucun)."""
+    c0 = np.round(np.asarray(conf, dtype=np.float64), 6)
+    if c0.size == 0:
+        return None
+    order = np.argsort(-c0, kind="stable")
+    c, ok = c0[order], np.asarray(correct, dtype=np.float64)[order]
     cum_acc = np.cumsum(ok) / np.arange(1, len(ok) + 1)
-    valid = np.where(cum_acc >= target)[0]
+    end = np.r_[c[:-1] > c[1:], True]            # {conf >= c[i]} = prefixe [0..i] seulement en fin de groupe
+    valid = np.where(end & (cum_acc >= target))[0]
     if len(valid) == 0:
         return None
-    return float(c[valid[-1]])
+    i = int(valid[-1])
+    thr, below = float(c[i]), (float(c[i + 1]) if i + 1 < len(c) else -math.inf)
+    t = math.floor(thr * 1e4) / 1e4              # lisible, et marge pour les reponses relues a l'execution
+    return t if t > below else round((thr + below) / 2, 7)   # valeurs a moins de 1e-4 : un point strictement entre les deux
 
 
 def _index_of(kind: str, q, label) -> int:
@@ -147,17 +158,20 @@ def _probs(q, a) -> np.ndarray:
 
 def collect(engine, examples: list[dict], on_progress=None):
     """Lit chaque exemple avec l'engine (sans calibration : temperature 1).
-    Renvoie per_kind {kind: (logits, index justes)} et per_qid {qid: (kind, logits, index justes)}."""
+    Renvoie per_kind {kind: (logits, index justes)} et per_qid {qid: (kind, logits, index justes, empreinte, cles d'etat)} :
+    l'empreinte de la question et les cles d'etat communes a ses exemples bornent ou sa temperature s'appliquera."""
     from jev_clone.schema import SystemOneRequest
 
     cal = getattr(engine, "cal", None)
-    if cal is not None and any(abs(cal.t(k) - 1.0) > 1e-9 for k in ("noul", "choice", "score")):
+    if cal is not None and (any(abs(cal.t(k) - 1.0) > 1e-9 for k in ("noul", "choice", "score"))
+                            or any(abs(float(e.get("T") or 1.0) - 1.0) > 1e-9 for e in cal.questions.values())):
         raise ValueError("la calibration se mesure sur des lectures brutes : engine sans calibration (T = 1) attendu")
     per_kind: dict[str, tuple[list, list]] = {"noul": ([], []), "choice": ([], []), "score": ([], [])}
-    per_qid: dict[str, tuple[str, list, list]] = {}
+    per_qid: dict[str, list] = {}
     for i, ex in enumerate(examples):
         req = SystemOneRequest(state=ex["state"], questions=questions_for(ex))
         resp = engine.answer(req)
+        keys = state_keys(req.state)
         for qid, q in req.questions.items():
             if qid not in ex.get("labels", {}):
                 continue
@@ -170,11 +184,15 @@ def collect(engine, examples: list[dict], on_progress=None):
                 continue
             lg = probs_to_logits(p)
             per_kind[q.type][0].append(lg); per_kind[q.type][1].append(gold)
-            e = per_qid.setdefault(qid, (q.type, [], []))
+            fp = question_fingerprint(q)
+            e = per_qid.setdefault(qid, [q.type, [], [], fp, keys])
             e[1].append(lg); e[2].append(gold)
+            if e[3] is not None and e[3] != fp:
+                e[3] = None                   # consigne variable sous un meme nom (rerank p0, p1...) : portee par nom seulement
+            e[4] = None if e[4] is None or keys is None else sorted(set(e[4]) & set(keys))
         if on_progress is not None:
             on_progress(i + 1, len(examples))
-    return per_kind, per_qid
+    return per_kind, {k: tuple(v) for k, v in per_qid.items()}
 
 
 def pad(rows: list[np.ndarray]) -> np.ndarray:
@@ -185,24 +203,41 @@ def pad(rows: list[np.ndarray]) -> np.ndarray:
     return out
 
 
-def fit(per_kind: dict, per_qid: dict, target_precision: float = 0.95) -> tuple[Calibration, dict]:
-    """Temperature par primitive (NLL), puis seuil par question sur gate_statistic des probabilites APRES temperature."""
+def fit(per_kind: dict, per_qid: dict, target_precision: float = 0.95, min_per_question: int = 30) -> tuple[Calibration, dict]:
+    """Temperature par question (NLL ; repli sur celle de sa primitive sous `min_per_question` exemples), appliquee a cette
+    seule question, puis seuil par question sur gate_statistic des probabilites APRES temperature. La temperature par
+    primitive (tout l'ensemble) reste pour les rapports et les questions a peu d'exemples."""
     cal, reports = Calibration(), {}
     for kind, (rows, labels) in per_kind.items():
         if not rows:
             continue
-        L, y = pad(rows), np.array(labels)
-        before = report(np.stack([softmax(l) for l in L]), y)
-        T = round(fit_temperature(L, y), 4)
-        cal.temperature[kind] = T
-        reports[kind] = {"before": before, "after": report(np.stack([softmax(l, T) for l in L]), y)}
-    for qid, (kind, rows, labels) in per_qid.items():
-        P = [softmax(l, cal.t(kind)) for l in rows]
+        cal.temperature[kind] = round(fit_temperature(pad(rows), np.array(labels)), 4)
+    after: dict[str, tuple[list, list]] = {}
+    for qid, entry in per_qid.items():
+        kind, rows, labels, *scope = entry
+        fp, keys = (list(scope) + [None, None])[:2]
+        T = round(fit_temperature(pad(rows), np.array(labels)), 4) if len(rows) >= min_per_question else cal.t(kind)
+        P = [softmax(l, T) for l in rows]
         conf = np.array([gate_statistic(p) for p in P])
         ok = np.array([float(p.argmax() == g) for p, g in zip(P, labels)])
-        thr = threshold_for_precision(conf, ok, target_precision)
-        cal.thresholds[qid] = None if thr is None else math.floor(thr * 1e4) / 1e4   # arrondi vers le bas : meme ensemble retenu
+        cal.questions[qid] = {"T": T, "kind": kind, "fp": fp, "state": keys, "n": len(rows)}
+        cal.thresholds[qid] = threshold_for_precision(conf, ok, target_precision)   # admet exactement l'ensemble evalue
+        a = after.setdefault(kind, ([], []))
+        a[0].extend(P); a[1].extend(labels)
+    for kind, (rows, labels) in per_kind.items():
+        if rows:
+            P, y = after.get(kind, ([softmax(l, cal.t(kind)) for l in rows], labels))
+            reports[kind] = {"before": report(np.stack([softmax(l) for l in pad(rows)]), np.array(labels)),
+                             "after": report(pad_probs(P), np.array(y))}
     return cal, reports
+
+
+def pad_probs(rows: list[np.ndarray]) -> np.ndarray:
+    K = max(len(r) for r in rows)
+    out = np.zeros((len(rows), K))
+    for i, r in enumerate(rows):
+        out[i, :len(r)] = r
+    return out
 
 
 def calibrate(engine, examples: list[dict], target_precision: float = 0.95, on_progress=None, **meta) -> tuple[Calibration, dict]:
@@ -226,13 +261,15 @@ def main(argv=None, engine=None):
     ap.add_argument("--target-precision", type=float, default=0.95)
     args = ap.parse_args(argv)
 
-    out = args.out
+    out, weights = args.out, None
     if out is None and args.studio_model:
-        from prophet_studio.calibration import calibration_file
+        from prophet_studio.calibration import calibration_file, registered_weights
         from prophet_studio.config import Paths
-        out = calibration_file(Paths().runs, args.studio_model)
+        paths = Paths()
+        out = calibration_file(paths.runs, args.studio_model)
         if out is None:
             ap.error(f"--studio-model : identifiant invalide {args.studio_model!r}")
+        weights = registered_weights(paths.installed, args.studio_model)   # la calibration vaut pour ces poids-la
     out = out or "runs/calibration.json"
     if engine is None:
         from jev_clone.backend_llamacpp import LlamaCppBackend
@@ -240,11 +277,14 @@ def main(argv=None, engine=None):
         engine = SystemOneEngine(LlamaCppBackend(args.server, max_workers=4))
     cal, reports = calibrate(engine, load_examples(args.data), args.target_precision, source="cli",
                              model_id=args.studio_model, data=str(args.data or SEEDS))
+    if weights is not None:
+        from prophet_studio.calibration import weights_id
+        cal.meta["weights"] = weights_id(weights)
     for kind, r in reports.items():
         print(f"== {kind} : avant ==\n{r['before']}")
-        print(f"== {kind} : apres T={cal.t(kind):.3f} ==\n{r['after']}")
+        print(f"== {kind} : apres (temperature par question) ==\n{r['after']}")
     cal.save(out)
-    print(f"calibration ecrite dans {out}: temperature={cal.temperature} seuils={cal.thresholds}")
+    print(f"calibration ecrite dans {out}: temperatures={ {q: e['T'] for q, e in cal.questions.items()} } seuils={cal.thresholds}")
     return cal
 
 

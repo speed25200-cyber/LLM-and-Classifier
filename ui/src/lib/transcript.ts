@@ -15,7 +15,8 @@ export function reduce(item: AssistantItem, evt: any): void {
     case "text.delta": {
       const kind = evt.type === "thinking.delta" ? "thinking" : "text";
       if (kind === "text") closeThinking(item, ts);
-      if (last && last.type === kind) (last as { text: string }).text += evt.text ?? "";
+      // jamais fusionne par-dessus une voie directe ecartee : la voie agent commence un bloc a elle
+      if (last && last.type === kind && blocks.length > (item.reroute?.at ?? 0)) (last as { text: string }).text += evt.text ?? "";
       else blocks.push(kind === "thinking" ? { type: "thinking", text: evt.text ?? "", started: ts } : { type: "text", text: evt.text ?? "" });
       break;
     }
@@ -50,14 +51,17 @@ export function reduce(item: AssistantItem, evt: any): void {
     case "permission.resolved":
       for (const b of blocks) if (b.type === "permission" && b.id === evt.id) b.decision = evt.allow ? "allow" : "deny";
       break;
-    case "s1.decision":
-      item.s1 = { ...(item.s1 ?? {}), pre: evt.pre, latency_ms: evt.latency_ms, budget: evt.budget, risk_level: evt.risk_level, path: evt.path };
+    case "s1.decision": // calibrated / s1_model : l'etat du classifieur pour CE tour
+      item.s1 = { ...(item.s1 ?? {}), pre: evt.pre, latency_ms: evt.latency_ms, budget: evt.budget, risk_level: evt.risk_level, path: evt.path,
+                  calibrated: evt.calibrated, s1_model: evt.s1_model, gates: evt.gates };
       break;
     case "s1.tools":
       item.s1 = { ...(item.s1 ?? {}), tools: evt.relevance };
       break;
     case "s1.reroute": // voie directe ecartee : les blocs deja la sont la premiere reponse, remplacee
-      item.reroute = { reason: evt.reason, verification: evt.verification ?? null, at: blocks.length };
+      item.reroute = { reason: evt.reason, verification: evt.verification ?? null, budget: evt.budget ?? null, at: blocks.length };
+      // voie et budget reels du tour ; la decision de S1 reste dans rerouted_from
+      item.s1 = { ...(item.s1 ?? {}), rerouted_from: item.s1?.path, path: evt.to ?? "agent", ...(evt.budget != null ? { budget: evt.budget } : {}) };
       break;
     case "turn.end":
       Object.assign(item, {
@@ -84,8 +88,22 @@ function closeThinking(item: AssistantItem, ts: number) {
   if (b && b.type === "thinking" && b.started && b.ms == null) b.ms = (ts - b.started) * 1000;
 }
 
-/** Le texte diffuse couvre-t-il deja la reponse finale ? (chemin direct : oui ; agent : le resume de `done`) */
+/** Le texte diffuse couvre-t-il deja la reponse finale ? (chemin direct : oui ; agent : le resume de `done`)
+ *  Apres une reprise, seul compte le texte de la voie agent : la reponse directe ecartee ne tient pas lieu de reponse. */
 export function responseAlreadyShown(item: AssistantItem): boolean {
-  const text = item.blocks.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("").trim();
+  const text = item.blocks.slice(item.reroute?.at ?? 0).filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("").trim();
   return !!text && !!item.response && text.replace(/\s+/g, " ").includes(item.response.trim().replace(/\s+/g, " ").slice(0, 80));
+}
+
+// Champs du tour poses par les evenements s1.decision / s1.reroute (fusion de declarations avec ./types)
+declare module "./types" {
+  interface S1Info {
+    calibrated?: boolean;                  // calibration appliquee a CE tour (absent : tour enregistre avant ce champ)
+    s1_model?: string | null;              // classifieur qui a lu la demande (null : mode mono)
+    gates?: Record<string, number | null>; // seuils calibres des portes (null : ne jamais se fier a cette lecture)
+    rerouted_from?: "direct" | "agent";    // decision de S1 avant la reprise en voie agent
+  }
+  interface RerouteInfo {
+    budget?: number | null;                // budget de reflexion reel de la voie agent
+  }
 }

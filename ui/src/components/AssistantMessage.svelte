@@ -42,7 +42,7 @@
     </div>
 
     {#if item.s1}
-      <S1Strip s1={item.s1} />
+      <S1Strip s1={item.s1} rerouted={!!item.reroute} />
     {:else if live}
       <div class="analysing"><Zap size={13} /> <span class="shimmer">Le classifieur analyse la demande…</span></div>
     {/if}

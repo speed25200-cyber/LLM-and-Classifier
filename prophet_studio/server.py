@@ -412,6 +412,9 @@ def build_app(studio: Studio) -> FastAPI:
         target = float(b.get("target_precision") or 0.95)
         if not 0.5 <= target < 1.0:
             raise HTTPException(422, "target_precision doit etre entre 0,5 et 1")
+        if s1cal.id_problem(mid):            # avant la lecture des graines, pas une erreur 500 a la fin
+            raise HTTPException(422, s1cal.id_problem(mid))
+        weights = studio.installer.model_path(mid)   # poids lus maintenant : la calibration ne vaudra que pour eux
         try:
             cal = await asyncio.to_thread(s1cal.run, studio.runtime.s1_url, mid, studio.bus.publish, target)
         except s1cal.Busy as e:
@@ -420,7 +423,11 @@ def build_app(studio: Studio) -> FastAPI:
             raise HTTPException(502, f"calibration impossible : {type(e).__name__}: {str(e)[:300]}")
         if s1cal.active_s1_model(studio.runtime) != mid:
             raise HTTPException(409, "le classifieur a change pendant la calibration : relancez-la")
-        out = s1cal.store(studio.paths.runs, mid, cal)
+        try:
+            out = s1cal.store(studio.paths.runs, mid, cal, weights)
+        except Exception as e:                # evenement final : la progression ne reste pas bloquee a 82/82
+            studio.bus.publish({"type": "s1.calibration", "status": "error", "model": mid, "error": str(e)[:300]})
+            raise HTTPException(500, f"calibration non enregistree : {type(e).__name__}: {str(e)[:300]}")
         studio.bus.publish({"type": "s1.calibration", "status": "done", "model": mid, "done": out["n"], "total": out["n"]})
         _calibration_changed()
         return out
@@ -435,8 +442,11 @@ def build_app(studio: Studio) -> FastAPI:
         mid = b.get("model_id") or s1cal.active_s1_model(studio.runtime)
         if not isinstance(mid, str) or (mid not in MODELS and mid not in studio.installer.registry["models"]):
             raise HTTPException(404, f"modele inconnu : {mid}")
+        if s1cal.id_problem(mid):
+            raise HTTPException(422, s1cal.id_problem(mid))
         try:
-            out = s1cal.import_calibration(studio.paths.runs, mid, b.get("data"), b.get("path"), bool(b.get("force")))
+            out = s1cal.import_calibration(studio.paths.runs, mid, b.get("data"), b.get("path"), bool(b.get("force")),
+                                           weights=studio.installer.model_path(mid))
         except Exception as e:
             raise HTTPException(400, str(e)[:300])
         _calibration_changed()
