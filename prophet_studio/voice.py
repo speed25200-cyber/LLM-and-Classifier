@@ -6,6 +6,8 @@ Routage d'un enonce (FR / EN) :
   2. grammaire exacte ("nouvelle session", "stop", "accepte"...) -> commande immediate, sans modele ;
   3. enonce court et ambigu -> System One tranche en une passe (choice calibre : commande ou demande pour l'agent) ;
      sous le seuil de confiance, c'est une demande (on ne declenche jamais une commande par erreur) ;
+     accepter / refuser une autorisation n'agit QUE sur la phrase exacte de la grammaire : si seul le classifieur y
+     voit une reponse a l'autorisation, on rend `confirm_approve` / `confirm_deny` (l'interface demande la phrase exacte) ;
   4. sinon -> demande envoyee a l'agent.
 """
 
@@ -46,6 +48,7 @@ COMMANDS: dict[str, dict] = {
     "mute": {"desc": "turn the microphone off", "fr": ["coupe le micro", "micro off", "desactive le micro"], "en": ["mute", "microphone off", "stop listening"]},
     "clear_input": {"desc": "clear the text input box", "fr": ["efface", "efface tout", "vide le champ"], "en": ["clear", "clear input"]},
 }
+PERMISSION_COMMANDS = ("approve", "deny")   # agissent sur une autorisation : grammaire exacte seulement
 WAKE_WORDS = ("prophet", "prophete", "profet", "profete", "prof et", "profit")
 WAKE_PREFIXES = ("hey", "he", "eh", "ok", "okay", "dis", "salut", "bonjour", "hello", "hi", "alors")
 
@@ -90,6 +93,7 @@ class Route:
     confidence: float = 1.0
     source: str = "grammar"      # grammar | systemone | length | wake
     ms: float = 0.0
+    error: str | None = None     # classifieur en erreur (la phrase part alors a l'agent)
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -107,7 +111,8 @@ def route_utterance(text: str, s1_engine=None, require_wake: bool = False, wake:
     if cmd:
         return Route("command", rest, cmd, 0.99, "grammar", round((time.perf_counter() - t0) * 1000, 2))
     if len(normalize(rest).split()) > max_command_words or s1_engine is None:
-        return Route("prompt", rest, source="length" if s1_engine else "grammar", ms=round((time.perf_counter() - t0) * 1000, 2))
+        return Route("prompt", rest, source="length" if len(normalize(rest).split()) > max_command_words else "grammar",
+                     ms=round((time.perf_counter() - t0) * 1000, 2))
     criteria = {c: s["desc"] for c, s in COMMANDS.items()}
     criteria["prompt"] = "a question, request or task for the assistant itself (NOT an instruction to control the app)"
     try:
@@ -118,10 +123,12 @@ def route_utterance(text: str, s1_engine=None, require_wake: bool = False, wake:
         ms = round((time.perf_counter() - t0) * 1000, 2)
         p = float(a.probabilities.get(a.choice, 0.0))   # probabilite calibree de l'option retenue (pas l'entropie)
         if a.choice != "prompt" and p >= threshold:
-            return Route("command", rest, a.choice, round(p, 3), "systemone", ms)
+            # une autorisation ne se donne pas sur la foi du seul classifieur : on demande la phrase exacte
+            cmd = f"confirm_{a.choice}" if a.choice in PERMISSION_COMMANDS else a.choice
+            return Route("command", rest, cmd, round(p, 3), "systemone", ms)
         return Route("prompt", rest, None, round(float(a.probabilities.get("prompt", 0.0)), 3), "systemone", ms)
-    except Exception:
-        return Route("prompt", rest, source="grammar", ms=round((time.perf_counter() - t0) * 1000, 2))
+    except Exception as e:   # classifieur indisponible : la phrase part a l'agent, et on le dit
+        return Route("prompt", rest, None, 0.0, "systemone", round((time.perf_counter() - t0) * 1000, 2), f"{type(e).__name__}: {str(e)[:160]}")
 
 
 def pcm16_to_float(data: bytes) -> np.ndarray:

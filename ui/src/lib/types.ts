@@ -360,3 +360,8 @@ export interface S1CalibrationProgress {
 export interface Runtime {
   restarts?: { s1: number; s2: number };
 }
+
+// ---- computer use : disponibilite de l'outil navigateur (Playwright + Chromium), exposee par /api/state ----
+export interface CoreState {
+  browser?: { available: boolean; reason: string };
+}

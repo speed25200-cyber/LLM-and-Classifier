@@ -176,9 +176,11 @@ class Studio:
 
     def state(self) -> dict:
         plan = self.plan()
+        from jev_clone.computer_use import browser_available
         from jev_clone.desktop_use import desktop_available
         return {"version": __version__, "demo": self.demo, "hardware": self.hw.to_dict(), "settings": self.settings.get().model_dump(),
                 "desktop": dict(zip(("available", "reason"), (True, "bureau simule (demo)") if self.demo else desktop_available())),
+                "browser": dict(zip(("available", "reason"), browser_available())),
                 "plan": plan.to_dict(), "runtime": self.runtime.public(), "installed": self.installer.status(),
                 "downloads": self.downloader.snapshot(), "voice": self.voice.status(), "sessions": self.sessions.list(),
                 "permissions": self.agent.pending_permissions(), "running": list(self.agent.running), "recommended": self.recommended(),

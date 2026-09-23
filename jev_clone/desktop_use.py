@@ -6,7 +6,8 @@ fenetres de l'ordinateur via l'arbre d'accessibilite.
   act()     -> clic au centre d'un controle, saisie (ValuePattern, sinon presse-papiers), molette, touches,
                ouverture d'une application
   FastPolicy (clone de Jev) choisit l'action et le controle en une passe (~0,1 s) ; SlowPolicy (Bonsai) reprend
-  la main en cas de doute, avec en plus les outils `press_keys` et `open_app`.
+  la main en cas de doute, avec en plus les outils `press_keys` et `open_app`. Chaque clic, saisie, raccourci ou
+  lancement est juge par le clone avant execution (StepGuard) ; un pas risque demande votre confirmation.
 
 Backends : Windows UI Automation (paquet `uiautomation`, charge seulement sous Windows) ; `SimulatedDesktop`
 pour les tests et les demonstrations. L'arbre d'accessibilite est au bureau ce que l'arbre ARIA est au web : le
@@ -16,12 +17,14 @@ clone decide sur du texte, sans lire de pixels, d'ou la vitesse.
 from __future__ import annotations
 
 import base64
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
-from jev_clone.computer_use import ComputerUseAgent, Element, FastPolicy, PageState, SlowPolicy
+from jev_clone.computer_use import ComputerUseAgent, Element, FastPolicy, PageState, SlowPolicy, run_result
 from jev_clone.tools import SystemOneToolbox, _tool
 
 INTERACTIVE_TYPES = {"ButtonControl", "EditControl", "HyperlinkControl", "MenuItemControl", "ListItemControl", "TabItemControl",
@@ -109,6 +112,7 @@ class DesktopSession:
     def __init__(self, backend: "DesktopBackend", max_elements: int = 40, screenshot: bool = False):
         self.backend, self.max_elements, self.screenshot = backend, max_elements, screenshot
         self._targets: list[UINode] = []
+        self.last: PageState | None = None   # derniere observation : les indices des actions s'y rapportent
 
     def goto(self, target: str) -> None:        # "url" d'un agent de bureau = application a ouvrir
         self.backend.open_app(target)
@@ -117,6 +121,7 @@ class DesktopSession:
         title, app, nodes = self.backend.snapshot()
         shot = self.backend.screenshot_b64() if self.screenshot else None
         state, self._targets = nodes_to_state(title, app, nodes, self.max_elements, shot)
+        self.last = state
         return state
 
     def act(self, action: dict) -> dict:
@@ -215,7 +220,14 @@ class WindowsUIABackend(DesktopBackend):
         self.auto.SendKeys(keys_to_sendkeys(combo), waitTime=0.05)
 
     def open_app(self, name):
-        subprocess.Popen(f'start "" "{name}"', shell=True)
+        # jamais de shell : `start "" "{name}"` en shell=True laissait injecter une commande dans le nom
+        name = str(name).strip()
+        if not name or any(c in name for c in "\r\n\x00"):
+            raise ValueError("nom d'application invalide")
+        try:
+            os.startfile(name)   # type: ignore[attr-defined]  # ShellExecute : applications enregistrees, fichiers, URL
+        except OSError:
+            subprocess.Popen([name])   # argv sans shell (programme du PATH)
         import time
         time.sleep(1.2)
 
@@ -303,26 +315,24 @@ class DesktopSlowPolicy(SlowPolicy):
 
     def __init__(self, s2_backend, session: DesktopSession, toolbox: SystemOneToolbox | None = None, **kw):
         super().__init__(s2_backend, session, toolbox, **kw)
-        s = session
 
         # ces actions peuvent changer de fenetre : on renvoie la nouvelle observation (et on rafraichit les indices),
-        # sinon Bonsai viserait les controles de l'ancienne fenetre
-        def press_keys(a):
-            act = {"type": "press_keys", "keys": a["keys"]}
-            r = s.act(act); self.executed.append(act); return {**r, "observation": s.observe().text()}
-
-        def open_app(a):
-            act = {"type": "open_app", "name": a["name"]}
-            r = s.act(act); self.executed.append(act); return {**r, "observation": s.observe().text()}
+        # sinon Bonsai viserait les controles de l'ancienne fenetre ; comme clic et saisie, elles sont jugees avant execution
         self.loop.extra["press_keys"] = (_tool("press_keys", "Press a keyboard shortcut in the active window, e.g. 'ctrl+s', 'alt+f4', 'enter'.",
-                                               {"keys": {"type": "string"}}, ["keys"]), press_keys)
+                                               {"keys": {"type": "string"}}, ["keys"]),
+                                         lambda a: self.act({"type": "press_keys", "keys": a["keys"]}, observe=True))
         self.loop.extra["open_app"] = (_tool("open_app", "Open an application or a file by name (e.g. 'notepad', 'calc', 'C:/path/file.txt').",
-                                             {"name": {"type": "string"}}, ["name"]), open_app)
+                                             {"name": {"type": "string"}}, ["name"]),
+                                       lambda a: self.act({"type": "open_app", "name": a["name"]}, observe=True))
 
 
 def make_desktop_factory(s1_engine, s2_backend, backend_factory: Callable[[], DesktopBackend] | None = None, vision: bool = False,
-                         max_steps: int = 24):
-    """Fabrique l'outil `desktop` de Prophet : run(goal, app=None, slots=None) -> resultat compact."""
+                         max_steps: int = 24, confirm: Callable[[str, dict], bool] | None = None,
+                         on_event: Callable[[dict], None] | None = None, should_stop: Callable[[], bool] | None = None,
+                         ledger: str | Path | None = None):
+    """Fabrique l'outil `desktop` de Prophet : run(goal, app=None, slots=None) -> resultat compact.
+    confirm : autorisation des pas risques (sans elle, ils sont refuses) ; on_event / should_stop : progression par pas et
+    annulation ; ledger : journal des trajectoires (re-entrainement de la politique rapide, training/make_from_trajectories.py)."""
     def factory():
         def run(goal: str, app: str | None = None, slots: dict | None = None) -> dict:
             def go() -> dict:
@@ -330,12 +340,10 @@ def make_desktop_factory(s1_engine, s2_backend, backend_factory: Callable[[], De
                 session = DesktopSession(backend, screenshot=vision)
                 agent = ComputerUseAgent(session, FastPolicy(s1_engine),
                                          DesktopSlowPolicy(s2_backend, session, SystemOneToolbox(s1_engine), vision=vision), max_steps=max_steps,
-                                         ledger=None)
+                                         ledger=ledger, confirm=confirm, on_event=on_event, should_stop=should_stop, kind="desktop")
                 out = agent.run(goal, url=app, slots=slots or {})
                 final = session.observe()
-                fast = sum(1 for r in out["records"] if r.get("path") == "fast")
-                return {"ok": out["status"] == "done", "status": out["status"], "steps": out["steps"], "fast_steps": fast,
-                        "window": final.title, "app": final.url, "screen": final.aria[:2500]}
+                return {**run_result(out), "window": final.title, "app": final.url, "screen": final.aria[:2500]}
             if backend_factory is None and sys.platform == "win32":
                 import uiautomation as auto
                 with auto.UIAutomationInitializerInThread():

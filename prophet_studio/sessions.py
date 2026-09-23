@@ -225,11 +225,18 @@ class AgentService:
                 s1, s2 = self.engines()
                 ctx = max(4096, self.ctx())
                 ws = Workspace(session.get("workspace") or st.workspace)
+                # computer use : un pas risque passe par la meme demande d'autorisation (sauf mode « jamais »), un evenement
+                # par pas, annulation par Stop, trajectoires journalisees pour re-entrainer la politique rapide (DAgger)
+                from jev_clone.desktop_use import desktop_available
+                runs = self.runs_dir or self.store.root.parent / "runs"
+                cu = {"confirm": (lambda d, j: True) if pm == "auto" else confirm, "on_event": emit, "should_stop": cancel.is_set}
+                desktop_ok = st.desktop_tool and (self.desktop_backend is not None or desktop_available()[0])   # hors Windows : outil absent
                 prophet = Prophet(s1, s2, ws, confirm=confirm, max_turns=24, on_event=emit, should_stop=cancel.is_set,
                                   permission_mode=pm, plan_mode=plan_mode, max_context_chars=int(ctx * 3.2 * 0.7),
                                   max_tokens=max(1024, min(8192, ctx // 3)),
-                                  browser_factory=make_browser_factory(s1, s2) if st.browser_tool else None,
-                                  desktop_factory=make_desktop_factory(s1, s2, self.desktop_backend) if st.desktop_tool else None)
+                                  browser_factory=make_browser_factory(s1, s2, ledger=runs / "trajectories.jsonl", **cu) if st.browser_tool else None,
+                                  desktop_factory=make_desktop_factory(s1, s2, self.desktop_backend, ledger=runs / "desktop_trajectories.jsonl", **cu)
+                                  if desktop_ok else None)
                 turn = prophet.handle(text, session["history"], effort=eff)
                 session["history"] += [{"role": "user", "content": text}, {"role": "assistant", "content": turn.response}]
             except Exception as e:
