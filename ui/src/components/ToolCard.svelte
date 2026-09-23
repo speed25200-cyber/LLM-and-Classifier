@@ -2,6 +2,7 @@
   import { Check, ChevronRight, CircleAlert, FileCode2, FilePen, FilePlus2, FileSearch, FolderTree, Globe, Hammer, NotebookPen, Search, SquareTerminal, Zap, Code2, Monitor } from "@lucide/svelte";
   import type { Block } from "../lib/types";
   import { app } from "../lib/store.svelte";
+  import { api } from "../lib/api";
   import { highlight, langFromPath } from "../lib/markdown";
   import { ms, pct } from "../lib/format";
   import { parseUnifiedDiff } from "../lib/diff";
@@ -66,7 +67,12 @@
         <div class="note">{r.reason ?? "Action bloquee."}</div>
       {:else if (b.name === "write_file" || b.name === "edit_file") && b.ui?.diff}
         <DiffView diff={b.ui.diff} />
-        <div class="foot"><button class="btn ghost sm" onclick={() => openFile(a.path)}>Voir le fichier</button></div>
+        <div class="foot">
+          {#if /\.(html?|svg|pdf|png|jpe?g)$/i.test(a.path ?? "")}
+            <button class="btn ghost sm" onclick={() => api("/api/open", { body: { path: a.path, session: app.session?.id } })}>Ouvrir</button>
+          {/if}
+          <button class="btn ghost sm" onclick={() => openFile(a.path)}>Voir le fichier</button>
+        </div>
       {:else if b.name === "run_command" || b.name === "python"}
         <div class="term mono">
           {#if b.name === "run_command"}<div class="cmd"><span class="ps">$</span> {a.command}</div>{:else}<pre class="code">{@html highlight(a.code ?? "", "python")}</pre>{/if}
@@ -135,7 +141,7 @@
   :global(.tool .chev.open) { transform: rotate(90deg); }
   .running .spinner { color: var(--s2); }
   .body { border-top: 1px solid var(--line); }
-  .foot { display: flex; justify-content: flex-end; padding: 4px 6px; border-top: 1px solid var(--line); background: var(--surface); }
+  .foot { display: flex; justify-content: flex-end; gap: 4px; padding: 4px 6px; border-top: 1px solid var(--line); background: var(--surface); }
   .term { background: var(--bg-2); font-size: 12px; }
   .cmd { padding: 9px 14px; color: var(--text); border-bottom: 1px solid var(--line); white-space: pre-wrap; word-break: break-all; }
   .ps { color: var(--s1); margin-right: 4px; }
