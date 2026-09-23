@@ -18,11 +18,10 @@ et macOS. Rien de ce qui suit n'a encore tourne sur les vrais modeles ni sur un 
 | Depuis les sources | developpeurs | `uv sync --extra studio` puis `uv run prophet-studio` |
 
 Application de bureau : aucune release GitHub ni etiquette `v*` n'existe (sur une etiquette, `desktop.yml` ne cree qu'un
-brouillon, a publier a la main). Les seuls paquets construits sont les artefacts de l'execution #2 du workflow Bureau, au
-commit `0194265`, avant le cycle d'audit et de correctifs : ils embarquent le coeur (`jev_clone/`, `prophet_studio/`) de ce
-commit, sans le comportement decrit en section 5. Le workflow ne se relance que si `desktop/`, `uv.lock` ou `desktop.yml`
-changent : pour un paquet a jour, le lancer a la main (Actions > Bureau > Run workflow) ou construire localement
-([`desktop/README.md`](../desktop/README.md)).
+brouillon, a publier a la main). Les paquets a jour sont les artefacts du workflow Bureau (derniere execution reussie :
+#3, commit `288bb87`, avec le comportement decrit en section 5). Le workflow se relance a chaque modification de ce que les
+paquets embarquent (`desktop/`, `jev_clone/`, `prophet_studio/`, `pyproject.toml`, `uv.lock`) ; construction locale :
+[`desktop/README.md`](../desktop/README.md).
 
 Tant que la branche `claude/local-llm-high-performance-q4wk6f` n'est pas fusionnee dans `main`, les URL `.../main/installer/...`
 repondent 404 : prendre le script sur la branche et lui passer la meme reference (`-Ref` / `--ref`) pour le code.
@@ -477,9 +476,9 @@ Verifie ici (Linux, sans GPU) :
 Configure dans la CI (etat de chaque commit : onglet Actions du depot) : tests Python sur `ubuntu-latest` et
 `windows-latest` ; interface (`npm run check`, `npm run build`) ; coquille Tauri (`cargo fmt`, `clippy`, `test`) ; paquets
 NSIS + MSI (`windows-latest`), deb + AppImage (`ubuntu-22.04`), app + dmg (`macos-14`) : construits, jamais executes.
-Etat : au commit `fbec3b9` (CI #16), les quatre jobs passent, tests Windows compris ; les executions #9 a #15 etaient en
-echec (#14 annulee). Paquets : une seule construction reussie (workflow Bureau #2, commit `0194265`, avant le cycle
-d'audit), non reconstruits depuis (section 1).
+Etat : au commit `288bb87` (CI #17), les quatre jobs passent, tests Windows compris (les executions #9 a #15 etaient en
+echec : disque plein du runner Windows par des fichiers creux de test, Stop pendant un silence sous Windows ; corriges).
+Paquets : workflow Bureau #3 reussi au meme commit (trois systemes), reconstruits a chaque modification du coeur.
 
 Non verifie :
 * **rien n'a tourne sur les vrais modeles** (Ternary-Bonsai, Bonsai 2 27B) **ni sur un vrai GPU** : latences S1, debits

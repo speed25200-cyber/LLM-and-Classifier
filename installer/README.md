@@ -20,10 +20,8 @@ previennent si une RTX 50xx a un pilote trop ancien.
 
 ## 1. Application de bureau
 
-Etat actuel : **aucune release publiee** (ni etiquette `v*`). Les seuls paquets construits sont les artefacts de
-l'execution #2 du workflow **Bureau** (commit `0194265`), anterieurs au cycle d'audit et de correctifs : ils embarquent
-l'ancien coeur. Pour le code a jour, preferer la methode 2, ou relancer le workflow Bureau a la main (Actions > Bureau >
-Run workflow). Une fois une release publiee, page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases) :
+Etat actuel : **aucune release publiee** (ni etiquette `v*`). Les paquets a jour sont les artefacts du workflow
+**Bureau** (derniere execution reussie : #3, commit `288bb87`), reconstruits a chaque modification du coeur. Une fois une release publiee, page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases) :
 
 * **Windows** : `Prophet Studio_<version>_x64-setup.exe` (installation pour l'utilisateur courant, sans droits
   administrateur) ou le `.msi`. Les installateurs ne sont pas signes : SmartScreen affiche un avertissement,

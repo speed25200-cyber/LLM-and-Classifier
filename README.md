@@ -117,9 +117,9 @@ dans Studio (Modeles > Importer un GGUF, role Classifieur, puis Calibrer ; voir 
 ## Ce qui est verifie / ce qui ne l'est pas
 * Verifie ici (Linux, sans GPU) : `uv run --no-sync pytest -q` -> **349 passent, 9 sautes** (tests en direct qui attendent
   `JEV_TEST_SERVER`, `JEV_TEST_S1` / `JEV_TEST_S2`, `JEV_TEACHER_URL`, `JEV_S1_EVAL_URL` ; fusion LoRA qui attend
-  `MERGE_LORA_ADAPTER` + `LLAMA_CPP_DIR`). CI : au commit `fbec3b9`, tests verts sous Linux et Windows (executions #9 a #15 en echec ou annulees).
-* Installeurs de bureau : aucune release publiee ; les seuls paquets (NSIS + MSI, deb + AppImage, dmg) ont ete construits
-  une fois par la CI, au commit `0194265`, avant le cycle d'audit : ils embarquent l'ancien coeur (docs/12, section 1).
+  `MERGE_LORA_ADAPTER` + `LLAMA_CPP_DIR`). CI : au commit `288bb87` (CI #17), tests verts sous Linux et Windows.
+* Installeurs de bureau : aucune release publiee ; paquets (NSIS + MSI, deb + AppImage, dmg) construits par la CI au commit
+  `288bb87` (workflow Bureau #3, coeur a jour), en artefacts ; reconstruits a chaque modification du coeur (docs/12, section 1).
 * Non verifie : tout ce qui demande les vrais modeles ou un vrai GPU (debits, latences S1, qualite des decisions
   zero-shot, calibration reelle, VRAM) ; les installeurs executes sous Windows et macOS ; UI Automation sur un vrai
   Windows ; la chaine d'entrainement sur de vrais poids ; le garde-fou n'a eu qu'une revue adversariale (tests unitaires
