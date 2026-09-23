@@ -11,7 +11,7 @@ minimisation supervisee. On ajoute optionnellement une distillation (KL) vers le
 Donnees : JSONL {"state": ..., "questions": {...}, "labels": {qid: ...}, "teacher_probs": {qid: {...}}?}
     python training/train_lora_rlcd.py --model Qwen/Qwen3.5-0.8B-Base --data data/train.jsonl \
         --val data/val.jsonl --out runs/jev-0.8b --epochs 1 --loss nll --kl 0.5 --permutations 2
-Export GGUF ensuite (voir training/README.md).
+Export GGUF ensuite : training/merge_lora.py (fusion de l'adaptateur, conversion, quantification ; voir training/README.md).
 
 NOTE : ce script n'a pas pu etre execute dans l'environnement de redaction (pas de GPU / torch) ;
 il suit la recette de reflex/decider et doit etre valide sur la machine cible (voir README).
@@ -27,8 +27,12 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+
+try:
+    import torch
+    import torch.nn.functional as F
+except ImportError:   # chargeur de donnees (load_examples) utilisable sans torch : tests, verification d'un JSONL
+    torch = F = None
 
 from jev_clone.calibrate import fit_temperature, report
 from jev_clone.prompt import PromptFormat, build_branches
@@ -129,7 +133,7 @@ def evaluate(model, tok, rows, device, max_len, bs=8):
     return L, np.array(golds)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-0.8B-Base")
     ap.add_argument("--data", required=True)
@@ -152,8 +156,10 @@ def main():
     ap.add_argument("--save-every", type=int, default=0, help="sauvegarder un point de reprise tous les N pas (0 = fin seulement)")
     ap.add_argument("--chat", action="store_true", default=True, help="format ChatML + <think></think> (identique au serveur)")
     ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
+    if torch is None:
+        raise SystemExit("torch manquant : pip install -e \".[train]\" (GPU CUDA requis pour l'entrainement)")
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -264,7 +270,7 @@ def main():
         model.save_pretrained(out / "merged"); tok.save_pretrained(out / "merged")
         print("modele complet sauvegarde dans", out / "merged")
     else:
-        model.save_pretrained(out)
+        model.save_pretrained(out); tok.save_pretrained(out)   # adapter_config.json porte le modele de base (merge_lora.py)
         print("adaptateur LoRA sauvegarde dans", out)
     if val_rows:
         L, y = evaluate(model, tok, val_rows, device, args.max_len)
@@ -276,6 +282,10 @@ def main():
         merged = model.merge_and_unload()
         merged.save_pretrained(out / "merged"); tok.save_pretrained(out / "merged")
         print("modele fusionne (pour conversion GGUF) dans", out / "merged")
+    if args.qlora:   # base 4-bit : la fusion se fait sur la base rechargee en bf16, hors de ce processus
+        print(f"QLoRA : fusion + GGUF avec  python training/merge_lora.py --adapter {out} --llama-cpp <llama.cpp> --quant Q8_0,Q4_K_M")
+    else:
+        print(f"GGUF : python training/merge_lora.py --merged {out / 'merged'} --llama-cpp <llama.cpp> --quant Q8_0,Q4_K_M")
 
 
 if __name__ == "__main__":

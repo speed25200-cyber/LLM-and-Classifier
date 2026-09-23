@@ -7,11 +7,19 @@ Deux modes d'etiquetage, combinables :
   * think : Bonsai raisonne (budget de reflexion) puis repond en JSON strict (json_schema) -> etiquette dure
             de meilleure qualite pour les cas ambigus (lent : generation)
 
-    python -m jev_clone.distill --bonsai http://127.0.0.1:8080 --in data/states.jsonl --out data/labeled.jsonl \
-        --mode soft --think-if-below 0.85
+    python -m jev_clone.distill --teacher http://127.0.0.1:8080 --in data/states.jsonl --out data/labeled.jsonl \
+        --mode soft --think-if-below 0.85 --workers 4 --resume
 
-Entree : JSONL {"state": ..., "questions": {...}}  (labels optionnels, conserves)
-Sortie : JSONL {"state", "questions", "labels", "teacher_probs", "teacher_mode"}
+Entree : JSONL {"state": ..., "questions": {...}}  (labels optionnels)
+Sortie : JSONL {"state", "questions", "labels", "teacher_probs", "teacher_mode"} (+ "teacher_disagrees", "teacher_error")
+
+Etiquettes existantes :
+  * exemple sans cle "weak" (etats a vous) : en soft, les etiquettes presentes sont gardees et Bonsai complete les autres ;
+    en think, la reponse de Bonsai remplace tout (comportement historique) ;
+  * exemple genere par regles (training/make_synthetic_prophet.py, cle "weak") : ses etiquettes font foi, sauf celles
+    listees dans "weak" (estimations) que Bonsai remplace ; `teacher_disagrees` liste les questions ou Bonsai (soft)
+    pense autrement que la regle (a relire : regle fausse ou enseignant faible).
+Les distributions `teacher_probs` servent au terme KL de training/train_lora_rlcd.py (--kl).
 """
 
 from __future__ import annotations
@@ -19,6 +27,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from jev_clone.backend_llamacpp import LlamaCppBackend
 from jev_clone.engine import SystemOneEngine
@@ -64,57 +74,129 @@ def think_labels(backend: LlamaCppBackend, req: SystemOneRequest, budget: int = 
     return json.loads(content)
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Etiquetage par Bonsai (enseignant) pour le clone Jev")
-    ap.add_argument("--bonsai", default="http://127.0.0.1:8080")
+def _valid(q, v) -> bool:
+    """Une etiquette de Bonsai n'est gardee que si elle est dans le domaine de la question (serveur sans json_schema...)."""
+    if q.type == "noul":
+        return isinstance(v, bool)
+    if q.type == "choice":
+        return isinstance(v, str) and v in q.options()
+    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v < len(q.criteria)
+
+
+def label_example(engine, backend, ex: dict, mode: str = "soft", think_if_below: float | None = None, budget: int = 2048) -> dict:
+    """Un exemple etiquete par l'enseignant (voir la politique des etiquettes existantes en tete du module)."""
+    req = SystemOneRequest(state=ex["state"], questions=ex["questions"])
+    rules = "weak" in ex
+    weak = set(ex.get("weak") or [])
+    labels = {k: v for k, v in (ex.get("labels") or {}).items() if not (rules and k in weak)}
+    fixed = set(labels) if rules else set()
+    out = dict(ex)
+    step, guess = mode, {}
+    if mode in ("soft", "both"):
+        try:
+            answers = engine.answer(req).answers
+        except Exception as e:   # un etat refuse (contexte depasse...) ne bloque pas la suite ni la reprise (--resume)
+            answers, step, out["teacher_error"] = {}, "none", f"{type(e).__name__}: {str(e)[:200]}"
+        tp, low = {}, False
+        for qid, a in answers.items():
+            if a.type == "noul":
+                tp[qid] = {"true": a.noul, "false": 1 - a.noul}
+                guess[qid], conf = a.noul >= 0.5, max(a.noul, 1 - a.noul)
+            else:
+                tp[qid] = a.probabilities
+                guess[qid], conf = (a.choice if a.type == "choice" else int(round(a.score))), max(a.probabilities.values())
+            labels.setdefault(qid, guess[qid])
+            if think_if_below is not None and conf < think_if_below and qid not in fixed:
+                low = True
+        if answers:
+            out["teacher_probs"], out["teacher_mode"] = tp, "soft"
+        if low and mode == "soft":
+            step = "think"
+    if step in ("think", "both"):
+        try:
+            hard = think_labels(backend, req, budget=budget)
+            hard = {k: v for k, v in hard.items() if k in req.questions and k not in fixed and _valid(req.questions[k], v)}
+        except Exception as e:   # JSON tronque ou serveur sans json_schema : on garde la lecture soft
+            hard, out["teacher_error"] = {}, f"{type(e).__name__}: {str(e)[:200]}"
+        labels.update(hard)
+        if hard:
+            out["teacher_mode"] = "both" if mode == "both" else "think"
+    if rules:   # enseignant muet sur une estimation (think en echec) : l'estimation de la regle reste
+        labels.update({k: v for k, v in (ex.get("labels") or {}).items() if k in weak and k not in labels})
+        out["teacher_disagrees"] = sorted(q for q in fixed if q in guess and guess[q] != labels[q])
+    out["labels"] = labels
+    return out
+
+
+def label_rows(rows, backend, mode: str = "soft", think_if_below: float | None = None, budget: int = 2048, workers: int = 1,
+               engine=None, chunk: int = 64):
+    """Etiquette une suite d'exemples (ordre conserve, `workers` exemples en parallele) ; generateur."""
+    engine = engine or SystemOneEngine(backend)
+    fn = lambda ex: label_example(engine, backend, ex, mode, think_if_below, budget)   # noqa: E731
+    if workers <= 1:
+        yield from map(fn, rows)
+        return
+    buf: list = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for ex in rows:
+            buf.append(ex)
+            if len(buf) >= chunk:
+                yield from pool.map(fn, buf)
+                buf = []
+        yield from pool.map(fn, buf)
+
+
+def check_teacher(url: str, timeout: float = 5.0) -> None:
+    """Arret clair si l'enseignant ne repond pas (au lieu d'une erreur au premier exemple, apres le chargement)."""
+    import requests
+    try:
+        r = requests.get(f"{url.rstrip('/')}/health", timeout=timeout)
+        r.raise_for_status()
+    except Exception as e:
+        raise SystemExit(f"enseignant injoignable sur {url} ({type(e).__name__}) : lancez Bonsai 2 27B "
+                         f"(scripts/start_bonsai.sh, ou Prophet Studio : serveur S2) puis relancez") from None
+
+
+def _done_lines(path: Path) -> int:
+    """Lignes completes deja ecrites (une ligne coupee par un arret brutal est retiree)."""
+    if not path.exists():
+        return 0
+    data = path.read_bytes()
+    if data and not data.endswith(b"\n"):
+        data = data[: data.rfind(b"\n") + 1]
+        path.write_bytes(data)
+    return data.count(b"\n")
+
+
+def main(argv=None, backend=None):
+    ap = argparse.ArgumentParser(description="Etiquetage par Bonsai 2 27B (enseignant) pour le clone Jev")
+    ap.add_argument("--teacher", "--bonsai", dest="teacher", default="http://127.0.0.1:8080", help="URL du llama-server de Bonsai")
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--mode", choices=["soft", "think", "both"], default="soft")
     ap.add_argument("--think-if-below", type=float, default=None,
                     help="en mode soft : escalade vers 'think' si la confiance max < seuil")
     ap.add_argument("--budget", type=int, default=2048, help="budget de reflexion (tokens) en mode think")
+    ap.add_argument("--workers", type=int, default=1, help="exemples etiquetes en parallele (<= slots du serveur, -np)")
+    ap.add_argument("--resume", action="store_true", help="reprendre apres les lignes deja ecrites dans --out")
     args = ap.parse_args(argv)
 
-    backend = LlamaCppBackend(args.bonsai, max_workers=2)
-    engine = SystemOneEngine(backend)
+    if backend is None:
+        check_teacher(args.teacher)
+        backend = LlamaCppBackend(args.teacher, max_workers=2, timeout=600)
+    out = Path(args.out)
+    skip = _done_lines(out) if args.resume else 0
     n = 0
-    with open(args.inp) as fi, open(args.out, "w") as fo:
-        for line in fi:
-            if not line.strip():
-                continue
-            ex = json.loads(line)
-            req = SystemOneRequest(state=ex["state"], questions=ex["questions"])
-            out = dict(ex)
-            labels = dict(ex.get("labels", {}))
-            mode = args.mode
-            if mode in ("soft", "both"):
-                resp = engine.answer(req)
-                tp, low = {}, False
-                for qid, a in resp.answers.items():
-                    if a.type == "noul":
-                        tp[qid] = {"true": a.noul, "false": 1 - a.noul}
-                        labels.setdefault(qid, a.noul >= 0.5)
-                        conf = max(a.noul, 1 - a.noul)
-                    else:
-                        tp[qid] = a.probabilities
-                        labels.setdefault(qid, a.choice if a.type == "choice" else int(round(a.score)))
-                        conf = max(a.probabilities.values())
-                    if args.think_if_below is not None and conf < args.think_if_below:
-                        low = True
-                out["teacher_probs"] = tp
-                out["teacher_mode"] = "soft"
-                if low and mode == "soft":
-                    mode = "think"
-            if mode in ("think", "both"):
-                hard = think_labels(backend, req, budget=args.budget)
-                labels.update(hard)
-                out["teacher_mode"] = "think" if args.mode != "both" else "both"
-            out["labels"] = labels
-            fo.write(json.dumps(out, ensure_ascii=False) + "\n")
+    with open(args.inp, encoding="utf-8") as fi, open(out, "a" if skip else "w", encoding="utf-8") as fo:
+        rows = (json.loads(l) for i, l in enumerate(x for x in fi if x.strip()) if i >= skip)
+        for ex in label_rows(rows, backend, args.mode, args.think_if_below, args.budget, args.workers):
+            fo.write(json.dumps(ex, ensure_ascii=False) + "\n")
+            fo.flush()
             n += 1
-            if n % 20 == 0:
-                print(f"{n} exemples etiquetes", file=sys.stderr)
-    print(f"termine : {n} exemples -> {args.out}", file=sys.stderr)
+            if n % 50 == 0:
+                print(f"{skip + n} exemples etiquetes", file=sys.stderr)
+    print(f"termine : {n} exemples etiquetes" + (f" ({skip} deja faits)" if skip else "") + f" -> {args.out}", file=sys.stderr)
+    return n
 
 
 if __name__ == "__main__":

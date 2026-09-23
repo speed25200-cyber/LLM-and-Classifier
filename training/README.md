@@ -1,82 +1,78 @@
-# Entrainer son propre clone Jev (RLCD-lite) sur une RTX 4060
+# Entrainer le classifieur (S1) de Prophet Studio : donnees -> RLCD-lite -> GGUF -> Studio
 
-Objectif : partir d'un petit modele ouvert (Qwen3.5-0.8B-Base ou 2B-Base, hybrides GatedDeltaNet comme
-Bonsai 2) et lui apprendre a **decider** : lire l'etat, sortir une distribution honnete sur les options,
-sans jamais generer de texte. C'est la partie "clone de Jev" proprement dite ; le niveau 0 (lecture sur un
-modele non entraine) fonctionne deja sans cette etape, mais la calibration et la robustesse aux questions
-"maison" viennent de l'entrainement.
+Objectif : partir d'un petit modele ouvert (Qwen3.5-0.8B-Base ou 2B-Base, hybrides GatedDeltaNet comme Bonsai 2) et lui
+apprendre a **decider** ce que Prophet lui demande : lire l'etat, sortir une distribution honnete sur les options, sans
+jamais generer de texte. Le S1 livre (Ternary-Bonsai en lecture zero-shot) fonctionne deja ; l'entrainement apporte la
+justesse et la calibration sur les questions "maison". Chaine complete sur A100 : `colab/jev_bonsai_a100.ipynb`
+(guide : `docs/05-COLAB-A100.md`).
 
 ## 1. Donnees
 
-| Source | Comment | Volume conseille |
+| Source | Script | Remarque |
 |---|---|---|
-| Vos propres exemples etiquetes | JSONL `{"state", "questions", "labels"}` | 500 a 5 000 |
-| Distillation Bonsai 2 27B | `python -m jev_clone.distill --mode soft --think-if-below 0.85` sur vos etats non etiquetes | 5 000 a 50 000 |
-| Jeux publics de decision (banking77, go_emotions, ag_news, MMLU, HelpSteer2, tickets support...) | convertir en questions typees (voir `decider/data/` et `system-one-gemma` comme modeles de conversion) | 50 000 a 500 000 |
-| Ledger de production (`runs/ledger.jsonl`) | les cas escalades, re-etiquetes par Bonsai | continu |
+| **Prophet, par regles** (pre-tour, outils, verification, voix, garde-fou benin) | `make_synthetic_prophet.py` (`prophet_data.py`, `prophet_templates.py`) | forme d'etat et questions exactes de Prophet / Studio ; validation par gabarits tenus a l'ecart ; `--calib` = pre-tour pour `jev_clone.calibrate` |
+| Garde-fou : **vos** exemples risques | `make_synthetic_prophet.py --guard-extra fichier.jsonl` | obligatoire pour garder la famille `guard` (format dans l'en-tete du script) |
+| Bonsai 2 27B enseignant | `--teacher URL`, ou `python -m jev_clone.distill --in ... --workers 4 --resume` | `teacher_probs` (KL), estimations remplacees, `teacher_disagrees` a relire |
+| Computer use de Studio (DAgger) | `make_from_trajectories.py` | pas escalades vers Bonsai = exemples etiquetes |
+| Graines etendues par Bonsai | `make_synthetic_prophet.py --expand URL --per-seed 20` | demandes nouvelles de meme nature |
+| Historique de vos decisions | `make_from_history.py` | CSV / JSONL + schema |
+| Jeux publics (banking77, ag_news...) | `make_public_mix.py` | hors domaine : generalisation seulement, a petite dose (<= 20 %) |
 
-Melange recommande : 60 % public (generalisation) / 30 % distille (domaine) / 10 % etiquete a la main (verite).
-Ajouter des permutations d'options (`--permutations 2`) et des options "other / none of the above".
+Format commun (une ligne JSON) : `{"state", "questions", "labels", "teacher_probs"?}` ; les champs en plus (`family`,
+`group`, `weak`...) sont ignores par l'entrainement. Les graines livrees (`jev_clone/seeds/`) ne vont jamais dans
+l'entrainement : le bouton Calibrer de Studio les lit.
 
-## 2. Entrainement (RTX 4060 8 Go)
+## 2. Entrainement
 
 ```bash
 pip install -e ".[train]"
-# 0.8B : LoRA bf16 direct (poids 1.6 Go), batch 4 x accum 4, seq 1024  -> ~2-3 h pour 100k branches
-python training/train_lora_rlcd.py --model Qwen/Qwen3.5-0.8B-Base --data data/train.jsonl --val data/val.jsonl \
-    --out runs/jev-0.8b --loss nll --kl 0.5 --permutations 2
-# 2B : QLoRA (base 4-bit), batch 2 x accum 8                              -> ~6-8 h pour 100k branches
-python training/train_lora_rlcd.py --model Qwen/Qwen3.5-2B-Base --qlora --bs 2 --accum 8 ...
-```
-
-Objectif = regle de score propre (`--loss nll` ou `brier`) sur les logits restreints aux etiquettes,
-plus une KL vers les distributions de Bonsai (`--kl`) quand `teacher_probs` existe. C'est exactement la
-reduction "RL pour decisions calibrees" quand la politique emet la distribution elle-meme.
-
-Cibles de validation (jeu tenu a l'ecart) : accuracy >= niveau 0 + 10 points sur vos questions,
-**ECE <= 0.05**, Brier en baisse, precision selective >= 95 % a >= 70 % de couverture.
-
-## 2 bis. Avec une A100 80 Go (Colab) : fine-tuning complet
-
-```bash
-python training/make_public_mix.py --out data/public_train.jsonl --val data/public_val.jsonl --per-task 8000
-python training/train_lora_rlcd.py --model Qwen/Qwen3.5-2B-Base --full --data data/train.jsonl --val data/val.jsonl \
+python training/make_synthetic_prophet.py --out data/train.jsonl --val data/val.jsonl --calib data/calib.jsonl --n 20000 \
+    --guard-extra data/guard_risky.jsonl
+# A100 : QLoRA (defaut du notebook), ou --full pour tous les poids (lr plafonne a 2e-5)
+python training/train_lora_rlcd.py --model Qwen/Qwen3.5-0.8B-Base --qlora --data data/train.jsonl --val data/val.jsonl \
     --out runs/jev-clone --bs 16 --accum 2 --max-len 1536 --loss nll --kl 0.5 --permutations 2 --save-every 500
+# RTX 5060 / 4060 8 Go (Studio arrete) : 0.8B en QLoRA ou LoRA bf16, batch 2 x 8
+python training/train_lora_rlcd.py --model Qwen/Qwen3.5-0.8B-Base --qlora --bs 2 --accum 8 --data data/train.jsonl --out runs/jev-clone
 ```
-`--full` entraine tous les poids en bf16 (etats AdamW en fp32 : ~24 Go pour 2B + activations), lr plafonne a 2e-5 ;
-c'est la recette de decider (2B, 183 M tokens, 2,5 h sur GH200 ; compter 4-6 h sur A100). Le modele complet
-est ecrit dans `runs/jev-clone/merged/`, directement convertible en GGUF. `colab/jev_bonsai_a100.ipynb` enchaine
-tout (Bonsai enseignant, donnees, entrainement, export, calibration, copie sur Drive).
 
-## 2 ter. Un seul petit modele "Jev + LLM" (fusion au niveau modele)
+Objectif = regle de score propre (`--loss nll` ou `brier`) sur les logits restreints aux etiquettes, plus une KL vers les
+distributions de Bonsai (`--kl`) quand `teacher_probs` existe : la reduction "RL pour decisions calibrees" quand la
+politique emet la distribution elle-meme. `--sft-data` (`{"prompt", "response"}`) ajoute la generation de reponses
+courtes au meme modele (fusion au niveau modele, voir `docs/09-FUSION-PROFONDE.md`).
 
-Le meme backbone peut apprendre les deux modes : decisions calibrees (lecture restreinte) **et** generation
-de reponses courtes distillees de Bonsai. `--sft-data data/gen.jsonl` (`{"prompt", "response"}`, reponses
-produites par Bonsai 2 sur vos invites) et `--sft-ratio 0.3` melangent une perte causale standard sur la
-reponse (invite masquee) aux pas de decision. Resultat : sur la 4060, le modele rapide repond seul aux
-demandes simples et decide en une passe ; Bonsai n'est appele que pour le raisonnement long.
+Cibles (validation tenue a l'ecart, `eval_clone.py`) : exactitude >= S1 livre + 10 points par famille, **ECE <= 0,05**,
+garde-fou : `risky_miss_rate` = 0 et `benign_confirm_rate` en baisse.
 
-## 3. Export vers llama.cpp (pour servir avec `scripts/start_jev_clone.sh`)
+## 3. Export GGUF : `merge_lora.py`
 
 ```bash
-# 1) fusionner l'adaptateur (fait automatiquement sans --qlora : runs/jev-0.8b/merged ; avec QLoRA :
-#    recharger la base en bf16, appliquer l'adaptateur avec peft puis merge_and_unload())
-# 2) convertir (le fork PrismML ou llama.cpp mainline incluent convert_hf_to_gguf.py)
-python llama.cpp/convert_hf_to_gguf.py runs/jev-0.8b/merged --outfile runs/jev-0.8b-f16.gguf --outtype f16
-llama-quantize runs/jev-0.8b-f16.gguf runs/jev-0.8b-Q8_0.gguf Q8_0     # 0.8B Q8_0 ~ 0.9 Go
-# 3) servir
-JEV_GGUF=runs/jev-0.8b-Q8_0.gguf ./scripts/start_jev_clone.sh
-JEV_CALIBRATION=runs/jev-0.8b/calibration.json jev serve
+# QLoRA / LoRA : base rechargee en bf16 (jamais 4-bit), adaptateur fusionne, GGUF f16 puis quantifies
+python training/merge_lora.py --adapter runs/jev-clone --llama-cpp ../llama.cpp --quant Q8_0,Q4_K_M
+# --full (deja complet) : conversion seulement
+python training/merge_lora.py --merged runs/jev-clone/merged --llama-cpp ../llama.cpp --quant Q8_0
+python training/merge_lora.py --adapter runs/jev-clone --llama-cpp ../llama.cpp --check   # outils seulement
 ```
+`--llama-cpp` : clone du fork PrismML au tag du runtime de Studio
+(`git clone --depth 1 -b prism-b10683-d8f26ee https://github.com/PrismML-Eng/llama.cpp`), qui fournit
+`convert_hf_to_gguf.py` ; `llama-quantize` est cherche dans `--quantize-bin`, `bin/*/`, le runtime de Studio,
+`<llama.cpp>/build/bin`, le PATH. Tout outil manquant arrete le script **avant** la fusion, avec la commande pour
+l'installer. Sorties : `runs/jev-clone-f16.gguf`, `-Q8_0.gguf`, `-Q4_K_M.gguf`, `jev-clone.manifest.json`.
 
-Le serveur lit toujours les memes etiquettes (A..Z / Yes/No) par grammaire : aucune tete speciale a
-porter dans GGUF, ce qui est la raison de ce choix de conception.
+## 4. Dans Prophet Studio
 
-## 4. Pourquoi pas Bonsai lui-meme comme backbone entraine ?
+1. **Modeles > Importer un GGUF** : `jev-clone-Q8_0.gguf`, role **Classifieur** (id `custom-s1-jev-clone-q8-0`), puis
+   redemarrer les modeles.
+2. **Calibrer** quand il tourne (ou `python -m jev_clone.calibrate --server http://127.0.0.1:7881 --studio-model
+   custom-s1-jev-clone-q8-0`) ; variante : **Importer une calibration** avec le `calibration.json` produit par
+   `jev_clone.calibrate --data data/calib.jsonl` sur le GGUF (notebook). Le `calibration.json` ecrit par
+   `train_lora_rlcd.py` (temperature seule, generique) n'est pas applique par Studio.
+3. `python training/eval_clone.py --server http://127.0.0.1:7881 --data data/val.jsonl` avant / apres.
 
-Bonsai 2 est une representation ternaire QAT (quantization-aware training) produite avec des GPU
-datacenter et une propriete intellectuelle PrismML fermee : on ne peut pas le "re-entrainer" sur une 4060.
-On l'utilise donc **tel quel** (a) comme enseignant (distillation), (b) comme System One "mono" sans
-entrainement, (c) comme System Two. Les petits Ternary-Bonsai (1.7B/4B) servent de clone niveau 0 ;
-pour un clone **entraine**, on part d'un Qwen3.5 en pleine precision puis on le quantifie classiquement
-(Q8_0/Q4_K_M) : a 0.8B-2B, cela reste minuscule (0.5-2 Go).
+Le serveur lit toujours les memes etiquettes (A..Z / Yes/No) par grammaire : aucune tete speciale a porter dans GGUF.
+
+## 5. Pourquoi pas Bonsai lui-meme comme backbone entraine ?
+
+Bonsai 2 est une representation ternaire QAT produite avec des GPU datacenter et une propriete intellectuelle PrismML
+fermee : on ne peut pas le "re-entrainer" sur une carte grand public. On l'utilise donc **tel quel** (a) comme enseignant
+(distillation), (b) comme System One "mono" sans entrainement, (c) comme System Two. Pour un clone **entraine**, on part
+d'un Qwen3.5 en pleine precision puis on le quantifie classiquement (Q8_0 / Q4_K_M) : a 0.8B-2B, 0,5 a 2 Go.
