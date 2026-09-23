@@ -13,6 +13,7 @@ Tout est estime, puis confirme a l'execution (NVML) ; le superviseur descend l'e
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 KV_FACTOR = {"f16": 1.0, "q8_0": 0.53, "q4_0": 0.28}
 
@@ -36,6 +37,8 @@ class ModelSpec:
     thinking: bool = False
     note: str = ""
     tags: list[str] = field(default_factory=list)
+    custom: bool = False         # GGUF importe (clone entraine...) : memoire estimee depuis la taille du fichier
+    path: str = ""               # fichier local d'un GGUF importe
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,6 +73,31 @@ MODELS: dict[str, ModelSpec] = {m.id: m for m in [
               weights_gib=1.63, kv_kib_f16=144, overhead_gib=0.35, runtime="any", params_b=8.0,
               note="Pour 16 Go et plus.", tags=[]),
 ]}
+
+# ---- GGUF importes (clone entraine, cerveau personnel) ----------------------------------------------------------------
+# Architecture inconnue : poids = taille du fichier ; KV par token et surcout pris au-dessus des familles du catalogue
+# (classifieurs Qwen3 4B / 8B : 144 Kio ; 27B-32B denses : jusqu'a 256 Kio) : le plan reste prudent, NVML le confirme.
+CUSTOM_KV_KIB = {"s1": 160.0, "s2": 256.0}
+CUSTOM_OVERHEAD_GIB = {"s1": 0.4, "s2": 1.2}
+CUSTOM: dict[str, ModelSpec] = {}    # tenu a jour par l'installateur depuis son registre (installed.json)
+
+
+def custom_spec(model_id: str, role: str, path: str | Path, label: str = "") -> ModelSpec:
+    p = Path(path)
+    gib = p.stat().st_size / 2**30
+    return ModelSpec(model_id, role, label or p.stem, "", p.name, round(gib * 1.0737, 2), weights_gib=round(gib, 4),
+                     kv_kib_f16=CUSTOM_KV_KIB.get(role, 256.0), overhead_gib=CUSTOM_OVERHEAD_GIB.get(role, 1.2), runtime="any",
+                     thinking=role == "s2", note="GGUF importe : memoire estimee depuis la taille du fichier (KV et surcout majores).",
+                     tags=["personnel"], custom=True, path=str(p))
+
+
+def get_model(model_id: str) -> ModelSpec | None:
+    """Modele du catalogue, ou GGUF importe dont le fichier est toujours present."""
+    if model_id in MODELS:
+        return MODELS[model_id]
+    m = CUSTOM.get(model_id)
+    return m if m is not None and Path(m.path).is_file() else None
+
 
 # ---- modeles vocaux (sherpa-onnx, CPU : la VRAM reste au LLM) --------------------------------------------------------
 SHERPA = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
@@ -118,4 +146,5 @@ def kv_mib(model: ModelSpec, ctx: int, kv_type: str = "f16") -> float:
 
 
 def catalog_dict() -> dict:
-    return {"models": [m.to_dict() for m in MODELS.values()], "voice": [v.to_dict() for v in VOICE.values()], "runtime_repo": RUNTIME_REPO}
+    models = [*MODELS.values(), *(m for m in CUSTOM.values() if get_model(m.id) is not None)]
+    return {"models": [m.to_dict() for m in models], "voice": [v.to_dict() for v in VOICE.values()], "runtime_repo": RUNTIME_REPO}

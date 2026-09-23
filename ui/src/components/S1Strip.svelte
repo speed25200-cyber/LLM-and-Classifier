@@ -2,6 +2,7 @@
   import { ChevronDown, Zap } from "@lucide/svelte";
   import type { S1Info } from "../lib/types";
   import { num, pct } from "../lib/format";
+  import { app } from "../lib/store.svelte";
 
   // La signature de la fusion : ce que le classifieur (System One) a decide avant que Bonsai ne pense.
   let { s1 }: { s1: S1Info } = $props();
@@ -11,6 +12,8 @@
   const tools = $derived(Object.entries(s1.tools ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 8));
   const intent = $derived(pre.intent?.choice);
   const INTENT_FR: Record<string, string> = { chat: "conversation", create_app: "creer une app", modify_code: "modifier du code", run_command: "executer", browse: "web", remember: "memoire", other: "autre" };
+  // sans calibration chargee pour le classifieur en marche, les pourcentages sont des lectures brutes (T = 1)
+  const calibrated = $derived(app.s1Calibrated);
 </script>
 
 <div class="s1">
@@ -30,12 +33,15 @@
       <span class="chip s2" style="--d:4">reflexion {s1.budget ? `${num(s1.budget)} tok` : "aucune"}</span>
     {/if}
     {#if pre.clarify && pre.clarify.noul >= 0.5}<span class="chip warn" style="--d:5">ambigu {pct(pre.clarify.noul)}</span>{/if}
+    {#if !calibrated}
+      <span class="chip" style="--d:6" title="Aucune calibration chargee pour ce classifieur : pourcentages bruts. Ecran Modeles -> Calibrer.">non calibre</span>
+    {/if}
     <ChevronDown size={14} class="chev {open ? 'open' : ''}" />
   </button>
   {#if open}
     <div class="detail fade-in">
       <div class="col">
-        <div class="panel-title">Jugements calibres</div>
+        <div class="panel-title">{calibrated ? "Jugements calibres" : "Jugements (non calibres)"}</div>
         {#each [["reponse directe", pre.direct?.noul], ["raisonnement", pre.needs_reasoning?.noul], ["question utile", pre.clarify?.noul]] as [label, v]}
           {#if v != null}
             <div class="meter"><span>{label}</span><div class="bar"><i style="transform: scaleX({v})"></i></div><b class="tabnum">{pct(v as number)}</b></div>

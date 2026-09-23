@@ -33,6 +33,7 @@ include = ["jev_clone*", "prophet_studio*"]
 
 [tool.setuptools.package-data]
 prophet_studio = ["web/*", "web/**/*"]
+jev_clone = ["seeds/*.jsonl"]   # graines etiquetees : calibration du classifieur depuis Studio (bouton "Calibrer")
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

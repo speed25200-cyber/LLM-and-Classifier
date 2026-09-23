@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Brain, Check, Cpu, Download, Gauge, Mic, Play, Power, RotateCw, Server, Trash2, TriangleAlert, Upload, X, Zap, ScrollText } from "@lucide/svelte";
+  import { Brain, Check, Cpu, Download, Gauge, Mic, Play, Power, RotateCw, Server, Target, Trash2, TriangleAlert, Upload, X, Zap, ScrollText } from "@lucide/svelte";
   import { app } from "../lib/store.svelte";
   import { api } from "../lib/api";
   import { bytes, ctxLabel, eta, gb, mibToGib, num } from "../lib/format";
@@ -11,10 +11,26 @@
   const g = $derived(hw.primary_gpu);
   const plan = $derived(c.plan);
   const running = $derived(c.runtime.plan);
-  const replanNeeded = $derived(!!running && (running.s2.model_id !== plan.s2.model_id || running.s2.ctx !== plan.s2.ctx || running.s1?.device !== plan.s1?.device) && running.rung === 0);
+  const replanNeeded = $derived(
+    !!running &&
+      (running.s2.model_id !== plan.s2.model_id || running.s2.ctx !== plan.s2.ctx || running.s1?.device !== plan.s1?.device || running.s1?.model_id !== plan.s1?.model_id) &&
+      running.rung === 0,
+  );
+  // un modele impose (catalogue ou GGUF importe) que le plan n'applique pas ne doit jamais passer en silence
+  const unapplied = $derived(
+    [
+      { what: "Cerveau", want: c.settings.s2_model, got: plan.s2.model_id },
+      { what: "Classifieur", want: c.settings.s1_model, got: plan.s1?.model_id ?? "" },
+    ].filter((o) => o.want && o.want !== "auto" && o.want !== o.got),
+  );
+  const s1Installed = $derived(c.catalog.models.filter((m) => m.role === "s1" && c.installed.models[m.id]?.installed));
+  const missingCustom = $derived(Object.entries(c.installed.models).filter(([, v]) => v.custom && !v.installed));
   let logs = $state<{ name: string; lines: string[] } | null>(null);
   let importPath = $state("");
   let importRole = $state<"s1" | "s2">("s1");
+  let calPath = $state("");
+  let calModel = $state("");
+  const calTarget = $derived(calModel || app.activeS1 || s1Installed[0]?.id || "");
 
   const PRIO: { k: Priority; label: string; desc: string }[] = [
     { k: "equilibre", label: "Equilibre", desc: "Bonsai 2 entier sur GPU, contexte confortable" },
@@ -38,12 +54,15 @@
   async function doImport() {
     try {
       const r = await api<{ id: string }>("/api/import", { body: { path: importPath, role: importRole } });
-      app.toast("ok", "Modele importe", r.id);
+      app.toast("ok", "Modele importe", `${r.id} · choisi pour le prochain demarrage${importRole === "s1" ? " (pensez a le calibrer)" : ""}`, 7000);
       importPath = "";
       await app.updateSettings(importRole === "s1" ? { s1_model: r.id } : { s2_model: r.id });
     } catch (e) {
       app.toast("error", "Import impossible", String(e));
     }
+  }
+  async function doImportCalibration() {
+    if (await app.importCalibration(calPath.trim(), calTarget)) calPath = "";
   }
   const SERVERS = [
     { key: "s2" as const, label: "System Two · Bonsai", Icon: Brain },
@@ -108,6 +127,9 @@
         <div><span class="faint">Contexte</span><b>{ctxLabel(plan.s2.ctx)} tokens</b></div>
         <div><span class="faint">Classifieur</span><b>{plan.s1?.device === "gpu" ? "GPU" : "CPU"}</b></div>
       </div>
+      {#each unapplied as o (o.what)}
+        <div class="warnbox"><TriangleAlert size={14} /> {o.what} choisi « {o.want} » non applique : le plan utilise {o.got || "aucun modele"} (voir les notes).</div>
+      {/each}
       <ul class="notes">{#each plan.notes as n}<li>{n}</li>{/each}</ul>
       {#if replanNeeded}
         <button class="btn accent" onclick={() => app.startRuntime()}><RotateCw size={15} /> Appliquer et redemarrer</button>
@@ -161,7 +183,7 @@
     {/if}
   </section>
 
-  {#each [["s2", "Cerveau · System Two", "Le modele qui raisonne, code et appelle les outils."], ["s1", "Classifieur · System One", "Le decideur type Jev : jugements calibres en une passe, sans generation."]] as [role, title, sub] (role)}
+  {#each [["s2", "Cerveau · System Two", "Le modele qui raisonne, code et appelle les outils."], ["s1", "Classifieur · System One", "Le decideur type Jev : jugements probabilistes, sans generation ; calibrez-le pour des pourcentages honnetes."]] as [role, title, sub] (role)}
     <section class="card cat rise">
       <div class="ph"><div><div class="panel-title">{title}</div><p class="faint sub">{sub}</p></div></div>
       {#each c.catalog.models.filter((m) => m.role === role) as m (m.id)}
@@ -169,16 +191,34 @@
         {@const active = (role === "s2" ? (c.runtime.plan ?? plan).s2.model_id : (c.runtime.plan ?? plan).s1?.model_id) === m.id}
         <div class="model" class:active>
           <div class="mi">
-            <div class="mt"><b>{m.label}</b>{#each m.tags as t}<span class="chip {t === 'recommande' ? 's1' : ''}">{t}</span>{/each}{#if active}<span class="chip ok">actif</span>{/if}</div>
-            <p class="faint">{m.note}{m.quality ? ` · ${m.quality}` : ""}</p>
+            <div class="mt">
+              <b>{m.label}</b>{#each m.tags as t}<span class="chip {t === 'recommande' ? 's1' : ''}">{t}</span>{/each}{#if active}<span class="chip ok">actif</span>{/if}
+              {#if role === "s1" && inst}
+                {@const cal = app.calibrations[m.id]}
+                {#if cal && !cal.error}
+                  <span class="chip ok" title="Temperature par primitive et seuils par question ({cal.source ?? '?'})">calibre{cal.n ? ` · ${cal.n} ex.` : ""}</span>
+                {:else}
+                  <span class="chip warn" title={cal?.error ?? "Pourcentages bruts : lancez Calibrer quand ce classifieur tourne, ou importez une calibration."}>non calibre</span>
+                {/if}
+              {/if}
+            </div>
+            <p class="faint">{m.note}{m.quality ? ` · ${m.quality}` : ""}{m.custom && m.path ? ` · ${m.path}` : ""}</p>
             {@render dlrow(m.id)}
           </div>
           <div class="ma">
             <span class="size tabnum">{gb(m.size_gb)}</span>
             {#if inst}
               <span class="chip ok"><Check size={12} /> installe</span>
-              {#if !active}<button class="btn sm ghost" onclick={() => app.updateSettings(role === "s2" ? { s2_model: m.id } : { s1_model: m.id })}>Utiliser</button>{/if}
-              <button class="icon-btn" title="Supprimer" onclick={() => app.removeInstalled(m.id)}><Trash2 size={14} /></button>
+              {#if role === "s1" && app.activeS1 === m.id}
+                <button class="btn sm" onclick={() => app.calibrateS1()} disabled={!!app.calibrating}
+                        title="Lit les graines etiquetees livrees avec ce classifieur et ajuste temperature + seuils (fichier propre a ce modele)">
+                  {#if app.calibrating}<span class="spinner"></span> {app.calibrating.total ? `${app.calibrating.done}/${app.calibrating.total}` : "…"}{:else}<Target size={14} /> Calibrer{/if}
+                </button>
+              {/if}
+              {#if !active && (role === "s2" ? c.settings.s2_model : c.settings.s1_model) === m.id}
+                <span class="chip" title="Choisi dans les reglages : applique au prochain demarrage des modeles">choisi</span>
+              {:else if !active}<button class="btn sm ghost" onclick={() => app.updateSettings(role === "s2" ? { s2_model: m.id } : { s1_model: m.id })}>Utiliser</button>{/if}
+              <button class="icon-btn" title={m.custom ? "Retirer de la liste (le fichier GGUF est conserve)" : "Supprimer"} onclick={() => app.removeInstalled(m.id)}><Trash2 size={14} /></button>
             {:else if !jobs(m.id).length}
               <button class="btn sm" onclick={() => app.install([m.id])}><Download size={14} /> Installer</button>
             {/if}
@@ -222,6 +262,18 @@
           <input class="input mono" placeholder="C:\chemin\vers\jev-clone-Q8_0.gguf" bind:value={importPath} />
           <select class="select" bind:value={importRole} style="width:150px"><option value="s1">Classifieur</option><option value="s2">Cerveau</option></select>
           <button class="btn" onclick={doImport} disabled={!importPath.trim()}><Upload size={14} /> Importer</button>
+        </div>
+        {#each missingCustom as [id, v] (id)}
+          <div class="warnbox"><TriangleAlert size={14} /> GGUF importe introuvable ({id}) : <span class="mono">{v.path}</span>
+            <button class="icon-btn" title="Retirer" onclick={() => app.removeInstalled(id)}><Trash2 size={13} /></button></div>
+        {/each}
+        <p class="faint cal">Importer une calibration (calibration.json du notebook ou d'une autre machine) pour un classifieur :</p>
+        <div class="row">
+          <input class="input mono" placeholder="C:\chemin\vers\calibration.json" bind:value={calPath} />
+          <select class="select" value={calTarget} onchange={(e) => (calModel = e.currentTarget.value)} style="width:150px" disabled={!s1Installed.length}>
+            {#each s1Installed as m (m.id)}<option value={m.id}>{m.label}</option>{/each}
+          </select>
+          <button class="btn" onclick={doImportCalibration} disabled={!calPath.trim() || !calTarget}><Upload size={14} /> Importer</button>
         </div>
       </div>
     </section>
@@ -276,6 +328,7 @@
   .dlm .icon-btn { width: 22px; height: 22px; }
   .import { border-top: 1px solid var(--line); padding-top: 12px; }
   .import p { margin: 0 0 8px; font-size: 12.5px; }
+  .import p.cal { margin-top: 14px; }
   .import .row { display: flex; gap: 8px; }
   @media (max-width: 1000px) { .grid, .grid.top, .servers { grid-template-columns: 1fr; } .kpis { grid-template-columns: repeat(2, 1fr); } }
 </style>

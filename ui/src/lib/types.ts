@@ -321,3 +321,37 @@ export interface RerouteInfo {
 export interface AssistantItem {
   reroute?: RerouteInfo;
 }
+
+// ---- classifieur (System One) : GGUF importes et calibration par modele ------------------------------------------------
+// Fusion de declarations : le catalogue liste aussi les GGUF importes (clone entraine), marques `custom`.
+export interface ModelSpec {
+  custom?: boolean;
+  path?: string;
+}
+
+export interface CalibrationReport {
+  n: number;
+  accuracy: number;
+  nll: number;
+  brier: number;
+  ece: number;
+  mean_confidence: number;
+}
+
+/** Une calibration par id de modele (`installed.calibration`) ; `error` = fichier illisible, jamais applique. */
+export interface S1Calibration {
+  model_id: string;
+  source?: "studio" | "cli" | "import" | string;
+  n?: number | null;
+  ts?: number;
+  temperature?: Record<string, number>;
+  thresholds?: Record<string, number | null>;
+  report?: Record<string, { before: CalibrationReport; after: CalibrationReport }>;
+  error?: string;
+}
+
+export interface S1CalibrationProgress {
+  model: string;
+  done: number;
+  total: number;
+}

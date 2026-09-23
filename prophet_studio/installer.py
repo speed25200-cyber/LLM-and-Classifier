@@ -23,7 +23,8 @@ from typing import Callable
 
 import requests
 
-from prophet_studio.catalog import MODELS, RUNTIME_REPO, VOICE
+from prophet_studio import calibration as s1cal
+from prophet_studio.catalog import CUSTOM, MODELS, RUNTIME_REPO, VOICE, custom_spec
 from prophet_studio.config import Paths, SettingsStore
 from prophet_studio.downloads import DownloadJob, Downloader, free_disk_gb
 from prophet_studio.hardware import GPU
@@ -139,6 +140,7 @@ class Installer:
         self.http = http or requests.Session()
         self._lock = threading.Lock()
         self.registry = self._load()
+        self._sync_custom()
         self.on_change: Callable[[], None] | None = None   # rappel apres chaque installation (demarrage automatique)
 
     # ---- registre ------------------------------------------------------------------------------------------------
@@ -150,10 +152,23 @@ class Installer:
                 pass
         return {"models": {}, "runtime": None, "voice": {}}
 
+    def _sync_custom(self) -> None:
+        """GGUF importes presents sur disque -> modeles que le planificateur sait placer (catalog.CUSTOM)."""
+        fresh = {}
+        for mid, r in self.registry["models"].items():
+            if mid not in MODELS and r.get("role") in ("s1", "s2") and Path(r.get("main", "")).is_file():
+                try:
+                    fresh[mid] = custom_spec(mid, r["role"], r["main"], r.get("label", ""))
+                except OSError:
+                    pass
+        CUSTOM.clear()
+        CUSTOM.update(fresh)
+
     def _save(self) -> None:
         tmp = self.paths.installed.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.registry, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.paths.installed)
+        self._sync_custom()
         self.emit({"type": "install.changed", "installed": self.status()})
         if self.on_change is not None:
             try:
@@ -193,9 +208,11 @@ class Installer:
                            "mmproj": bool(r and r.get("mmproj")), "size_gb": spec.size_gb}
         for mid, r in self.registry["models"].items():
             if mid not in MODELS:
-                models[mid] = {"installed": Path(r["main"]).exists(), "path": r["main"], "custom": True, "role": r.get("role"), "label": r.get("label")}
+                models[mid] = {"installed": Path(r["main"]).exists(), "path": r["main"], "custom": True, "role": r.get("role"), "label": r.get("label"),
+                               "size_gb": CUSTOM[mid].size_gb if mid in CUSTOM else None}
         rt = self.registry.get("runtime")
         return {"models": models, "runtime": rt if (rt and self.server_binary()) else None,
+                "calibration": s1cal.status(self.paths.runs),     # calibration du classifieur, par id de modele
                 "custom_server": bool(self.settings.get().llama_server_path),
                 "voice": {vid: (vid in self.registry["voice"]) for vid in VOICE}, "free_disk_gb": round(free_disk_gb(self.paths.root), 1)}
 
@@ -247,8 +264,11 @@ class Installer:
         p = Path(path).expanduser().resolve()
         if not p.exists() or p.suffix.lower() != ".gguf":
             raise FileNotFoundError(f"GGUF introuvable : {p}")
+        if role not in ("s1", "s2"):
+            raise ValueError(f"role inconnu : {role!r} (s1 = classifieur, s2 = cerveau)")
         mid = f"custom-{role}-{re.sub(r'[^a-z0-9]+', '-', p.stem.lower()).strip('-')}"
         with self._lock:
+            s1cal.forget(self.paths.runs, mid)   # nouveaux poids sous le meme id : l'ancienne calibration ne s'applique plus
             self.registry["models"][mid] = {"main": str(p), "role": role, "label": label or p.stem, "installed_at": time.time(), "custom": True}
             self._save()
         return mid
@@ -261,6 +281,8 @@ class Installer:
                     for k in ("main", "mmproj"):
                         if r.get(k):
                             Path(r[k]).unlink(missing_ok=True)
+                else:
+                    s1cal.forget(self.paths.runs, item_id)   # le meme id pourra designer d'autres poids
                 self._save(); return True
             if item_id in self.registry["voice"]:
                 self.registry["voice"].pop(item_id); self._save(); return True
