@@ -67,7 +67,7 @@ def studio(tmp_path: Path, monkeypatch, gpu: str, demo: bool = True) -> Studio:
     return Studio(paths, TOKEN, 7878, demo=demo)
 
 
-# ---- planificateur / arguments : S1 sur CPU = un slot, rien sur le GPU ; S1 sur GPU = 4 slots a KV unifie ---------------
+# ---- planificateur / arguments : S1 sur CPU = un slot, rien sur le GPU ; S1 sur GPU = 4 slots de 8 k chacun --------------
 def test_s1_on_cpu_single_slot_isolated_from_gpu_and_gpu_s1_unified_kv():
     p = make_plan(hw())                                    # RTX 5060 8 Go, equilibre : classifieur sur CPU
     assert p.s1.device == "cpu" and p.s1.np == 1
@@ -80,7 +80,8 @@ def test_s1_on_cpu_single_slot_isolated_from_gpu_and_gpu_s1_unified_kv():
     ti = make_plan(hw("NVIDIA GeForce RTX 5060 Ti", 16311, 700))       # 16 Go : classifieur sur GPU
     assert ti.s1.device == "gpu" and ti.s1.np == 4
     a = build_args(ti.s1, Path("s1.gguf"), 8081)
-    assert "-kvu" in a and "--no-cache-idle-slots" in a and "--device" not in a and server_env(ti.s1) == {}
+    # KV non unifie, -c = 8 k x 4 : chaque slot garde son contexte entier (voir test_fix_r1_runtime)
+    assert "-kvu" not in a and arg(a, "-c") == "32768" and "--no-cache-idle-slots" in a and "--device" not in a and server_env(ti.s1) == {}
     assert make_plan(HardwareInfo("Linux", "6", "x86_64", "i7", 8, 16, 16, 12, True, False, [])).s1.np == 1   # tout CPU
 
 
@@ -94,7 +95,7 @@ def test_s1_ladder_and_mono_plan():
     m = mono_plan(ti)                                      # classifieur prevu sur GPU mais absent : Bonsai prend 2 slots
     assert m.s2.np == 2 and m.s1 == ti.s1
     a = build_args(m.s2, Path("s2.gguf"), 8080)
-    assert arg(a, "-np") == "2" and "-kvu" in a and "--no-cache-idle-slots" in a
+    assert arg(a, "-np") == "2" and "-kvu" not in a and arg(a, "-c") == str(2 * ti.s2.ctx) and "--no-cache-idle-slots" in a
     assert degrade(m).s2.np == 1 and degrade(m).s2.mmproj == "gpu"   # 1er cran anti-OOM : on rend le 2e slot
     assert mono_plan(make_plan(hw())).s2.np == 1           # 8 Go, classifieur prevu sur CPU : pas de marge VRAM
     cpu = make_plan(HardwareInfo("Linux", "6", "x86_64", "i7", 8, 16, 16, 12, True, False, []))
@@ -211,7 +212,8 @@ def test_mono_at_start_two_slots_then_duo_restored_after_s1_install(tmp_path, mo
         st.start_runtime()
         assert until(lambda: rt.state in ("ready", "degraded", "error"), 40)
         assert rt.state == "degraded" and rt.mono and rt.s1_url == rt.s2.url, rt.message
-        assert arg(rt.s2.argv, "-np") == "2" and "-kvu" in rt.s2.argv and rt.plan.s2.np == 2
+        assert arg(rt.s2.argv, "-np") == "2" and "-kvu" not in rt.s2.argv and rt.plan.s2.np == 2
+        assert arg(rt.s2.argv, "-c") == str(2 * rt.plan.s2.ctx)   # contexte entier pour chaque slot
         pid = rt.s2.proc.pid
         st.installer.registry["models"][s1_id] = saved
         st.installer._save()                                # fin d'installation : rappel on_change

@@ -3,8 +3,15 @@
   import { app } from "../lib/store.svelte";
   import { ctxLabel, mibToGib, num } from "../lib/format";
   import { toggleHandsfree } from "../lib/voice";
+  import type { Runtime } from "../lib/types";
 
   const plan = $derived(app.core?.runtime.plan ?? app.core?.plan);
+  // relance automatique en cours (restarting) et relances deja faites par le watchdog (restarts, au plus une par serveur)
+  const rt = $derived(app.core?.runtime as (Runtime & { restarting?: "s1" | "s2" | null }) | undefined);
+  const relaunches = $derived.by(() => {
+    const r = rt?.restarts;
+    return r ? [r.s1 ? `S1 x${r.s1}` : "", r.s2 ? `S2 x${r.s2}` : ""].filter(Boolean).join(" · ") : "";
+  });
   const m = $derived(app.metrics);
   const last = $derived.by(() => {
     const t = app.session?.transcript ?? [];
@@ -34,7 +41,15 @@
         {#if used}<span class="mini" class:hot={used / plan.s2.ctx > 0.8}><i style="transform: scaleX({Math.min(1, used / plan.s2.ctx)})"></i></span>{/if}
       </span>
     {/if}
-    {#if app.core?.runtime.mono}<span class="it warn" title={app.core.runtime.message || "Bonsai repond aussi aux decisions System One"}>mode mono</span>{/if}
+    {#if rt?.restarting}
+      <span class="it warn" title={rt.message}><span class="spinner"></span> redemarrage {rt.restarting === "s1" ? "du classifieur" : "de Bonsai"}</span>
+    {:else if rt?.mono}
+      <span class="it warn" title={rt.message || "Bonsai repond aussi aux decisions System One"}>mode mono</span>
+    {/if}
+    {#if relaunches && !rt?.restarting}
+      <button class="it warn" onclick={() => (app.view = "models")}
+        title={`Relances automatiques apres un arret inattendu (au plus une par serveur)${rt?.message ? ` : ${rt.message}` : ""}`}>relance {relaunches}</button>
+    {/if}
     {#if dl.length}
       <button class="it dl" onclick={() => (app.view = "models")}>
         <span class="spinner"></span> {dl.length} telechargement{dl.length > 1 ? "s" : ""}{dlProgress != null ? ` · ${Math.round(dlProgress * 100)} %` : ""}
@@ -72,7 +87,7 @@
   .s2 { color: var(--s2); }
   .warn { color: var(--warn); }
   .dl { color: var(--text-2); }
-  .dl .spinner { width: 10px; height: 10px; border-width: 1.5px; }
+  .it .spinner { width: 10px; height: 10px; border-width: 1.5px; }
   .mini { position: relative; display: inline-block; width: 38px; height: 4px; border-radius: 4px; background: var(--surface-3); overflow: hidden; margin-left: 2px; }
   .mini i { position: absolute; inset: 0; background: var(--grad); transform-origin: left; transition: transform 600ms var(--ease); }
   .mini.hot i { background: var(--warn); }

@@ -21,6 +21,7 @@ PRIORITY_CTX_CAP = {"equilibre": 32768, "contexte": 131072, "vitesse": 16384}
 S1_CTX, S1_SLOTS, S1_KV = 8192, 4, "q8_0"
 S1_SLOTS_CPU = 1        # classifieur sur CPU : un seul slot, branches en sequence sur le meme cache (pas de re-prefill par slot)
 SAFETY_MIB = 256
+SLOT_STATE_MIB = 256    # 2e sequence de Bonsai (mode mono) : etat recurrent du 27B hybride + tampons, marge non mesuree
 S2_LAYERS = 65          # 64 blocs + sortie (Bonsai 2 27B / Qwen3.8) : repere pour le dechargement partiel
 
 
@@ -80,8 +81,14 @@ def s2_mib(m: ModelSpec, ctx: int, kv: str, mmproj_gpu: bool) -> dict:
             "mmproj": _gib(m.mmproj_gib) if mmproj_gpu else 0.0}
 
 
-def s1_mib(m: ModelSpec) -> dict:
-    return {"s1_weights": _gib(m.weights_gib), "s1_runtime": _overhead_mib(m), "s1_kv": kv_mib(m, S1_CTX, S1_KV)}
+def kv_ctx(sp: ServerPlan) -> int:
+    """Cache KV passe a llama-server (-c) : contexte par slot x slots. Sans -kvu, llama-server le partage en parts egales :
+    chaque slot a son contexte entier et garanti (sp.ctx), et un slot plein ne fait jamais echouer les requetes des autres."""
+    return sp.ctx * max(1, sp.np)
+
+
+def s1_mib(m: ModelSpec, np: int = 1) -> dict:
+    return {"s1_weights": _gib(m.weights_gib), "s1_runtime": _overhead_mib(m), "s1_kv": kv_mib(m, S1_CTX * np, S1_KV)}
 
 
 def expected_speed(g: GPU | None, m: ModelSpec, device: str) -> dict:
@@ -212,11 +219,15 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
     m, ctx, s1_gpu = chosen
     mm = "gpu" if mmproj_gpu else "cpu"
     s2 = ServerPlan("s2", m.id, "gpu", 99, ctx, 1, kv, mm if m.mmproj_pattern else "off", 2048 if m.thinking else -1)
-    s1 = ServerPlan("s1", s1m.id, "gpu" if s1_gpu else "cpu", 99 if s1_gpu else 0, S1_CTX, S1_SLOTS if s1_gpu else S1_SLOTS_CPU, S1_KV,
-                    threads=None if s1_gpu else max(2, min(hw.cpu_cores - 1, 8)))
     parts = s2_mib(m, ctx, kv, mmproj_gpu)
+    # classifieur sur GPU : le contexte de Bonsai est choisi avec un slot (le minimum), puis autant de slots de 8 k (KV propre
+    # a chaque slot) que la VRAM restante en permet, jusqu'a 4
+    s1_np = (next((n for n in (S1_SLOTS, 2) if sum(parts.values()) + sum(s1_mib(s1m, n).values()) <= avail), 1) if s1_gpu
+             else S1_SLOTS_CPU)
+    s1 = ServerPlan("s1", s1m.id, "gpu" if s1_gpu else "cpu", 99 if s1_gpu else 0, S1_CTX, s1_np, S1_KV,
+                    threads=None if s1_gpu else max(2, min(hw.cpu_cores - 1, 8)))
     if s1_gpu:
-        parts.update(s1_mib(s1m))
+        parts.update(s1_mib(s1m, s1_np))
     used = sum(parts.values())
     budget = {"total": total, "other": other, **{k: round(v) for k, v in parts.items()}, "reserve": SAFETY_MIB,
               "free": round(max(0.0, total - other - SAFETY_MIB - used))}
@@ -225,7 +236,8 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         notes.append(f"{m.label} entierement sur GPU, cache KV {kv} ({ctx // 1024} k tokens de contexte).")
     else:
         notes.append(f"{m.label} : Bonsai 2 ne tient pas avec ce budget ({avail:.0f} Mio) ou la priorite 'vitesse' est choisie.")
-    notes.append("Classifieur (System One) sur GPU : ~0,05-0,15 s par decision (estimation GPU, 4 slots a KV unifie)." if s1_gpu else
+    notes.append(f"Classifieur (System One) sur GPU : ~0,05-0,15 s par decision (estimation GPU, {s1_np} slot{'s' if s1_np > 1 else ''} "
+                 f"de {S1_CTX // 1024} k tokens chacun)." if s1_gpu else
                  "Classifieur (System One) sur CPU pour laisser le contexte au 27B : un seul slot, questions en sequence sur le meme cache ; "
                  "~0,1-0,3 s par decision une fois l'etat lu, plus la lecture d'un etat neuf (prefill CPU, ~0,5-1 s pour 2 k tokens). "
                  "Estimations : mesurez avec le banc.")
@@ -281,11 +293,44 @@ def s1_on_cpu(plan: Plan) -> Plan:
 
 
 def mono_plan(plan: Plan) -> Plan:
-    """Classifieur absent au lancement : Bonsai repond aussi aux questions System One (mode mono). Un 2e slot (KV unifie :
-    contexte entier par slot) evite que ces lectures evincent le cache de la conversation ou fassent la queue, si la memoire
-    le permet : RAM (Bonsai sur CPU) ou VRAM rendue par un classifieur prevu sur GPU. Sur 8 Go avec le classifieur prevu sur
-    CPU, aucune marge n'est prevue pour l'etat recurrent d'une 2e sequence du 27B hybride : on garde un slot."""
-    if plan.s2.np > 1 or not (plan.s2.device == "cpu" or (plan.s1 is not None and plan.s1.device == "gpu")):
+    """Classifieur absent au lancement : Bonsai repond aussi aux questions System One (mode mono). Un 2e slot evite que ces
+    lectures evincent le cache de la conversation ou fassent la queue. KV non unifie (-c = 2 x contexte, voir kv_ctx) : chaque
+    slot a le contexte entier de la conversation, une lecture S1 (ou une 2e session) ne peut pas faire deborder la reponse en
+    cours. Seulement si ce KV et l'etat de la 2e sequence tiennent dans la memoire rendue par le classifieur absent (VRAM s'il
+    etait prevu sur GPU, RAM si Bonsai tourne sur CPU) plus la marge du plan ; sinon un slot : les lectures attendent leur
+    tour, mais rien n'echoue."""
+    s2, s1 = plan.s2, plan.s1
+    m = get_model(s2.model_id)
+    if s2.np > 1 or m is None:
         return plan
-    return replace(plan, s2=replace(plan.s2, np=2),
-                   notes=[*plan.notes, "Classifieur absent : mode mono, Bonsai prend un 2e slot pour les decisions System One."])
+    kv2 = kv_mib(m, s2.ctx, s2.kv_type)
+    extra, b = kv2 + SLOT_STATE_MIB, dict(plan.budget)
+    if s2.device == "cpu":
+        s1m = get_model(s1.model_id) if s1 is not None else None
+        freed = sum(s1_mib(s1m).values()) if s1m is not None else 0.0
+        head = max(0.0, b["ram_total_mib"] * 0.85 - b["ram_needed_mib"]) if "ram_needed_mib" in b else 0.0
+        if extra > freed + head:
+            return plan
+        if "ram_needed_mib" in b:
+            b["ram_needed_mib"] = round(b["ram_needed_mib"] - freed + extra)
+    elif s1 is not None and s1.device == "gpu":
+        freed, free = sum(v for k, v in b.items() if k.startswith("s1_")), float(b.get("free", 0))
+        if extra > freed + free:
+            return plan
+        if extra > free:   # le 2e slot prend la VRAM prevue pour le classifieur : voir attach_plan()
+            b, free = {k: v for k, v in b.items() if not k.startswith("s1_")}, free + freed
+        b.update(s2_kv=round(b.get("s2_kv", 0) + kv2), s2_runtime=round(b.get("s2_runtime", 0) + SLOT_STATE_MIB),
+                 free=round(max(0.0, free - extra)))
+    else:
+        return plan
+    return replace(plan, s2=replace(s2, np=2), budget=b,
+                   notes=[*plan.notes, "Classifieur absent : mode mono, Bonsai prend un 2e slot (contexte entier) pour les decisions System One."])
+
+
+def attach_plan(plan: Plan) -> Plan:
+    """Classifieur installe apres un demarrage en mode mono : si le 2e slot de Bonsai occupe la VRAM qui lui etait prevue, il
+    demarre sur CPU (un slot) plutot que de deborder la VRAM (sous Windows, elle deborderait en memoire partagee, sans erreur)."""
+    if plan.s1 is None or plan.s1.device != "gpu" or plan.s2.np < 2 or any(k.startswith("s1_") for k in plan.budget):
+        return plan
+    c = s1_on_cpu(plan)
+    return replace(c, notes=[*plan.notes, "Classifieur installe apres coup : sa VRAM sert au 2e slot de Bonsai, il demarre sur CPU."])

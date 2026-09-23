@@ -9,7 +9,8 @@ Pour chaque branche on envoie UNE requete /completion avec :
 
 Jamais plus de requetes en parallele que de slots du serveur (/props total_slots) : avec -np 1 (classifieur sur CPU),
 les branches passent en sequence sur le meme slot et reutilisent l'etat deja lu. Une erreur du serveur remonte avec
-son message (ex. depassement du contexte du slot) au lieu d'un simple "500 Server Error".
+son message (ex. depassement du contexte du slot) au lieu d'un simple "500 Server Error". Si le KV partage d'un serveur
+lance avec -kvu est plein ("Context size has been exceeded"), les branches refusees repassent une a une.
 
 Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp mainline
 (Bonsai 1-bit Q1_0, Ternary Q2_0_g64, Qwen3.5 GGUF...). Verifie contre un llama-server reel
@@ -32,6 +33,7 @@ from jev_clone.prompt import Branch, label_grammar
 from jev_clone.readout import probs_to_logits
 
 log = logging.getLogger(__name__)
+KV_FULL = "context size has been exceeded"   # llama-server : plus de place dans le KV (partage avec -kvu), 500 a chaque requete en cours
 
 
 def raise_for_status(r: requests.Response) -> None:
@@ -244,8 +246,18 @@ class LlamaCppBackend:
         if workers <= 1:
             return [first] + [self.score_branch(prefix, b) for b in rest]
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            out = list(ex.map(lambda b: self.score_branch(prefix, b), rest))
-        return [first] + out
+            out = list(ex.map(lambda b: self._branch_or_none(prefix, b), rest))
+        # tampon KV partage plein (serveur lance avec -kvu, autres requetes sur le meme serveur) : les branches refusees
+        # repassent une a une et relisent le prefixe deja en cache, au lieu de faire echouer toute la reponse
+        return [first] + [r if r is not None else self.score_branch(prefix, b) for r, b in zip(out, rest)]
+
+    def _branch_or_none(self, prefix: str, branch: Branch) -> BranchResult | None:
+        try:
+            return self.score_branch(prefix, branch)
+        except requests.HTTPError as e:
+            if KV_FULL in str(e).lower():
+                return None
+            raise
 
     # ---- acces bas niveau : gabarit de chat et completion brute par morceaux ----------------------
     def apply_template(self, messages: list[dict], **kw) -> str:
