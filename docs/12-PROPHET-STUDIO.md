@@ -188,7 +188,7 @@ Verifie ici (sans GPU) :
   (moteur factice) -> routage -> commande « nouvelle session » executee par l'interface (`tests/test_voice_e2e.py`) ;
 * la diffusion token par token (un correctif : `iter_lines` lisait par paquets de 512 octets) ;
 * le classifieur en panne : le tour se termine avec Bonsai seul, actions risquees confirmees ;
-* 97 tests (`pytest`), dont deux pilotes par Chromium (tour d'agent, voix).
+* 101 tests (`pytest`) : 97 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
 
 Non verifie ici (pas de GPU ni d'acces a Hugging Face / aux releases GitHub depuis l'environnement de redaction) :
 * les debits reels sur RTX 5060 (estimations ; bouton **Mesurer** et `eval/SCOREBOARD.md` pour les remplacer) ;
