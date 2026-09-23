@@ -7,14 +7,14 @@ from jev_clone.prophet import CORE_TOOLS, INTENTS, LANGUAGES, Prophet, Workspace
 from tests.conftest import MockS2, ScriptedBackend
 
 I, L = list(INTENTS), list(LANGUAGES)
-TR = ["readonly", "destructive", "privileged", "exfiltration"]
+TR = ["readonly", "workspace_write", "destructive", "privileged", "exfiltration"]
 
 
 def s1(direct=0.1, clarify=0.1, reasoning=0.2, risk=0, tool_risk="readonly", cmd_risk=0, ok=0.9, relevant=("write_file", "run_command")):
     pre = {"direct": [direct, 1 - direct], "clarify": [clarify, 1 - clarify], "needs_reasoning": [reasoning, 1 - reasoning],
            "risk": [1.0 if k == risk else 0.0 for k in range(4)],
            "intent": [0.9 if i == "create_app" else 0.1 / 6 for i in I], "language": [0.9 if l == "python" else 0.1 / 5 for l in L]}
-    guard = {"tool_risk": [0.9 if t == tool_risk else 0.1 / 3 for t in TR], "risk": [1.0 if k == cmd_risk else 0.0 for k in range(4)],
+    guard = {"tool_risk": [0.9 if t == tool_risk else 0.1 / 4 for t in TR], "risk": [1.0 if k == cmd_risk else 0.0 for k in range(4)],
              "policy_violation": [0.1, 0.9], "ok": [ok, 1 - ok]}
     rel = {f"t_{n}": [0.9, 0.1] for n in relevant}
     be = ScriptedBackend([pre, dict(guard, **rel)] + [dict(guard, **rel)] * 20, declared={"intent": I, "language": L, "tool_risk": TR}, default_noul=(0.2, 0.8))
@@ -95,4 +95,6 @@ def test_workspace_memory_and_browse_without_browser(tmp_path):
                  {"content": "", "tool_calls": [MockS2.tool_call("done", {"summary": "x"}, "c2")]}])
     t = Prophet(s1(relevant=("browse",)), s2, ws).handle("cherche la doc")
     assert "prefers TypeScript" in s2.calls[0][0][0]["content"]
-    assert json.loads(s2.calls[1][0][-1]["content"])["error"] == "browser not configured" and t.tool_calls[0]["tool"] == "browse"
+    # sans navigateur configure, browse n'est plus propose au modele (un appel force reste un outil inconnu)
+    assert "browse" not in [d["function"]["name"] for d in s2.calls[0][1]["tools"]] and "browse" not in t.tools_exposed
+    assert json.loads(s2.calls[1][0][-1]["content"])["error"] == "unknown tool browse"

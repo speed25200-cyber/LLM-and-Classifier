@@ -91,9 +91,9 @@ def test_desktop_factory_and_prophet_tool_are_guarded():
             got.update(goal=goal, app=app)
             return {"ok": True, "status": "done", "steps": 3, "fast_steps": 3, "window": "Calculatrice"}
         return go
-    tr = ["readonly", "destructive", "privileged", "exfiltration"]
+    tr = ["readonly", "workspace_write", "destructive", "privileged", "exfiltration"]
     pre = {"direct": [0.1, 0.9], "clarify": [0.1, 0.9], "needs_reasoning": [0.2, 0.8], "risk": [1, 0, 0, 0]}
-    guard = {"tool_risk": [0.1, 0.8, 0.05, 0.05], "risk": [0, 0, 1, 0], "policy_violation": [0.1, 0.9], "ok": [0.9, 0.1], "t_desktop": [0.9, 0.1]}
+    guard = {"tool_risk": [0.1, 0.0, 0.8, 0.05, 0.05], "risk": [0, 0, 1, 0], "policy_violation": [0.1, 0.9], "ok": [0.9, 0.1], "t_desktop": [0.9, 0.1]}
     s1 = SystemOneEngine(ScriptedBackend([pre, guard] + [guard] * 10, declared={"tool_risk": tr}, default_noul=(0.2, 0.8)), model_name="mock")
     s2 = MockS2([{"content": "", "tool_calls": [MockS2.tool_call("desktop", {"goal": "calcule 1+5", "app": "calc"})]},
                  {"content": "", "tool_calls": [MockS2.tool_call("done", {"summary": "6"}, "c2")]}])

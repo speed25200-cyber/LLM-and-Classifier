@@ -63,6 +63,8 @@ def reduce_event(item: dict, evt: dict) -> None:
         item["s1"] = {k: evt.get(k) for k in ("pre", "latency_ms", "budget", "risk_level", "path")}
     elif t == "s1.tools":
         item.setdefault("s1", {})["tools"] = evt.get("relevance")
+    elif t == "s1.reroute":   # la voie directe est ecartee : les blocs deja la sont la premiere reponse, remplacee
+        item["reroute"] = {"reason": evt.get("reason"), "verification": evt.get("verification"), "at": len(blocks)}
     elif t == "turn.end":
         item.update({k: evt.get(k) for k in ("path", "response", "verification", "latency_ms", "stopped_by", "stats")})
         item["status"] = "done"
@@ -112,6 +114,16 @@ class SessionStore:
     def delete(self, sid: str) -> None:
         self.path(sid).unlink(missing_ok=True)
 
+    def set_always_allow(self, sid: str, allow: list[str]) -> None:
+        """Ecrit seulement always_allow, relu et reecrit sous le verrou (jamais une copie perimee de la transcription)."""
+        with self._lock:
+            p = self.path(sid)
+            s = json.loads(p.read_text(encoding="utf-8"))
+            s["always_allow"] = list(allow)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(s, ensure_ascii=False, default=str), encoding="utf-8")
+            tmp.replace(p)
+
 
 class PendingPermission:
     def __init__(self, session_id: str, tool: str):
@@ -152,7 +164,7 @@ class AgentService:
             session = self.store.load(sid)
             turn_id = uuid.uuid4().hex[:10]
             cancel = threading.Event()
-            self.running[sid] = {"turn_id": turn_id, "cancel": cancel}
+            self.running[sid] = {"turn_id": turn_id, "cancel": cancel, "session": session}   # session vivante : revocation immediate
         st = self.settings()
         pm = permission_mode or st.permission_mode
         eff = effort or st.effort
@@ -170,19 +182,24 @@ class AgentService:
 
         def confirm(describe: str, judged: dict) -> bool:
             tool = judged.get("tool", "action")
-            if tool in session.get("always_allow", []):
+            # « toujours » vaut pour un couple (outil, classe de risque jugee par S1) ; sans jugement, pour l'outil seul.
+            # Un arret obligatoire (dangereux probable, politique, S1 en panne, action vue en partie) demande toujours.
+            grant = f"{tool}:{judged['tool_risk']}" if judged.get("s1_consulted") and judged.get("tool_risk") else tool
+            hard = bool(judged.get("hard_stop"))
+            if not hard and grant in session.get("always_allow", []):
                 return True
             pp = PendingPermission(sid, tool)
             self.permissions[pp.id] = pp
             emit({"type": "permission.request", "id": pp.id, "tool": tool, "describe": describe[:4000], "preview": judged.get("preview"),
-                  "judged": {k: v for k, v in judged.items() if k not in ("preview",)}})
+                  "judged": {**{k: v for k, v in judged.items() if k not in ("preview",)}, "grant": None if hard else grant}})
             while not pp.event.wait(0.25):
                 if cancel.is_set():
                     break
             self.permissions.pop(pp.id, None)
-            if pp.allow and pp.remember and tool not in session.setdefault("always_allow", []):
-                session["always_allow"].append(tool)
-            emit({"type": "permission.resolved", "id": pp.id, "allow": pp.allow, "remember": pp.remember})
+            remembered = pp.allow and pp.remember and not hard
+            if remembered and grant not in session.setdefault("always_allow", []):
+                session["always_allow"].append(grant)
+            emit({"type": "permission.resolved", "id": pp.id, "allow": pp.allow, "remember": remembered, "grant": grant if remembered else None})
             return pp.allow
 
         def run():
@@ -235,6 +252,21 @@ class AgentService:
 
     def pending_permissions(self) -> list[dict]:
         return [{"id": p.id, "session_id": p.session_id, "tool": p.tool} for p in self.permissions.values()]
+
+    # ---- autorisations memorisees (« toujours pour cet outil ») : visibles et revocables --------------------------------
+    def always_allow(self, sid: str) -> list[str]:
+        live = (self.running.get(sid) or {}).get("session")
+        return list((live if live is not None else self.store.load(sid)).get("always_allow", []))
+
+    def revoke(self, sid: str, grant: str | None = None) -> list[str]:
+        """Retire une autorisation (toutes si grant est None). Un tour en cours la perd aussitot (meme objet de session)."""
+        with self._lock:
+            live = (self.running.get(sid) or {}).get("session")
+            s = live if live is not None else self.store.load(sid)
+            allow = s.setdefault("always_allow", [])
+            allow[:] = [g for g in allow if grant is not None and g != grant]
+            self.store.set_always_allow(sid, allow)
+            return list(allow)
 
     def wait_idle(self, sid: str, timeout: float = 30) -> bool:
         t0 = time.time()

@@ -80,8 +80,11 @@ def s1_probs(prompt: str, labels: list[str]) -> list[float]:
     opts = p["options"]
     if not opts:
         return _norm([1.0 + _h(prompt + l) for l in labels])
-    if "risk posture" in qu:
-        return _norm([0.05 if risky else 0.9, 0.85 if risky else 0.04, 0.03, 0.03][: len(labels)])
+    if "risk posture" in qu:   # par nom d'option : readonly, workspace_write (ecriture locale), destructive, ...
+        wr = re.search(r'"proposed_action":\s*"(?:write|edit|new tool) ', st) is not None
+        w = {"readonly": 0.05 if risky else 0.3 if wr else 0.9, "workspace_write": 0.04 if risky else 0.62 if wr else 0.04,
+             "destructive": 0.85 if risky else 0.02}
+        return _norm([next((v for k, v in w.items() if t.startswith(k)), 0.03 if risky else 0.02) for _, t in opts][: len(labels)])
     if "how costly" in qu:
         return _norm([0.1, 0.2, 0.3, 0.4] if risky else [0.82, 0.13, 0.04, 0.01])
     words = set(re.findall(r"[a-zà-ÿ_]{3,}", req))

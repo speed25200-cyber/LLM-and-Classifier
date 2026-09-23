@@ -117,7 +117,7 @@ class AgentResult:
     content: str | None
     steps: list[AgentStep]
     messages: list[dict]
-    stopped_by: str  # "final" | "max_turns" | "stop_tool"
+    stopped_by: str  # "final" | "max_turns" | "stop_tool" | "length" (reponse coupee par max_tokens) | "cancelled" | "error"
 
 
 class AgentLoop:
@@ -231,8 +231,9 @@ class AgentLoop:
                 self._emit({"type": "llm.error", "error": str(e)[:300]})
                 stopped = "error"; break
             msg = resp["choices"][0]["message"]
+            finish = resp["choices"][0].get("finish_reason")
             self._emit({"type": "llm.end", "turn": turn, "timings": resp.get("timings") or {}, "usage": resp.get("usage") or {},
-                        "finish_reason": resp["choices"][0].get("finish_reason")})
+                        "finish_reason": finish})
             step = AgentStep(turn=turn, content=msg.get("content"), reasoning=msg.get("reasoning_content"))
             calls = msg.get("tool_calls") or []
             if resp.get("cancelled"):
@@ -273,8 +274,8 @@ class AgentLoop:
                 stopped = "cancelled"; break
             if stop:
                 stopped = "stop_tool"; break
-            if not calls:
-                stopped = "final"; break
+            if not calls:   # coupee par max_tokens : reponse tronquee, pas une fin propre
+                stopped = "length" if finish == "length" else "final"; break
         res = AgentResult(content=steps[-1].content if steps else None, steps=steps, messages=msgs, stopped_by=stopped)
         self._log(res)
         return res

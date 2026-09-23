@@ -436,6 +436,17 @@ def build_app(studio: Studio) -> FastAPI:
             raise HTTPException(404, "demande expiree")
         return {"ok": True}
 
+    # autorisations memorisees d'une session ("outil:classe de risque", ou "outil" pour une action non jugee) : liste et revocation
+    @app.get("/api/sessions/{sid}/always_allow")
+    def always_allow(sid: str):
+        _load(sid)
+        return {"always_allow": studio.agent.always_allow(sid)}
+
+    @app.delete("/api/sessions/{sid}/always_allow")
+    def revoke_always_allow(sid: str, grant: str | None = None):
+        _load(sid)
+        return {"always_allow": studio.agent.revoke(sid, grant)}   # sans grant : tout revoquer
+
     def _ws_root(session: str | None) -> Path:
         root = studio.settings.get().workspace
         if session:

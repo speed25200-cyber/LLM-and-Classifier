@@ -10,15 +10,17 @@ passe, a chaque tour, des *proprietes* de la demande :
   * un noul par outil du catalogue : les outils pertinents sont presentes en premier, les outils de base et
     les jugements restent toujours disponibles ; au-dela de `max_tools`, seuls les plus pertinents sont exposes
   * `intent`, `language` : etiquettes d'observation (journal, entrainement), jamais un aiguillage
-Pendant la boucle, Bonsai consulte le clone (`judge_*`) ; chaque commande ou nouvel outil passe par le
-garde-fou du clone (risque d'outil) et, au-dela d'un niveau, par votre confirmation. Tout tour est journalise.
+Pendant la boucle, Bonsai consulte le clone (`judge_*`) ; chaque commande, code, nouvel outil, appel de competence,
+navigation web ou ecriture de fichier executable passe par le garde-fou du clone (risque d'outil, juge sur tout ce qui
+va s'executer) et, si l'action est risquee ou le verdict incertain, par votre confirmation. `.prophet/` n'est jamais
+ecrit par les outils de fichiers. Une voie directe ratee est reprise en voie agent. Tout tour est journalise.
 """
 
 from __future__ import annotations
 
+import ast
 import difflib
 import fnmatch
-import importlib.util
 import json
 import os
 import platform
@@ -26,12 +28,13 @@ import re
 import subprocess
 import sys
 import time
+import types
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from jev_clone.presets import GUARDRAILS, with_meta
+from jev_clone.presets import GUARDRAILS, RISKY_TOOL_CLASSES, with_meta
 from jev_clone.tools import AgentLoop, SystemOneToolbox, _tool
 
 INTENTS = {"chat": "conversation or question", "create_app": "create an application, script, site or project", "modify_code": "change existing files",
@@ -58,7 +61,27 @@ Guidelines:
 - When finished, call done with a short summary.
 {memory}"""
 
+# voie directe : prompt propre (aucun outil ni `done` dans cette reponse) ; NEEDS_TOOLS = Bonsai demande la voie agent
+DIRECT_PROMPT = """You are Prophet, a local assistant running on the user's machine ({platform}). This is the quick-answer path:
+answer the user's message directly and concisely, in the user's language. No tool, file, command or web access is available
+in this reply, so never claim to have created, read, changed or run anything.
+If a correct answer really needs files, commands, the web or several steps of work, reply with exactly NEEDS_TOOLS and nothing else.
+{memory}"""
+NEEDS_TOOLS = "NEEDS_TOOLS"
+# une reponse directe qui pretend avoir agi (sans outils, c'est faux) ou dit ne pas avoir acces : la voie agent s'impose
+CLAIMS_ACTION = re.compile(r"\bi(?:'ve| have)? (?:just )?(?:created|written|saved|updated|modified|edited|deleted|installed|executed|ran)\b"
+                           r"|\bj'ai (?:bien )?(?:cr[eé][eé]|[eé]crit|enregistr[eé]|modifi[eé]|mis [aà] jour|supprim[eé]|install[eé]|ex[eé]cut[eé]|lanc[eé])"
+                           r"|\b(?:i (?:don't|do not|can't|cannot) (?:have )?access|je n'ai pas acc[eè]s|je ne peux pas acc[eé]der)"
+                           r"|<tool_call>|\"name\":\s*\"(?:write_file|edit_file|run_command|python|done)\"", re.IGNORECASE)
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
+BUILTIN_TOOLS = ("write_file", "edit_file", "read_file", "list_files", "glob", "grep", "run_command", "python", "browse",
+                 "remember", "create_tool", "done", "desktop")   # une competence ne les remplace jamais
+# fichiers dont le contenu s'execute (ecrits : juges en mode smart ; lances par run_command : montres au juge)
+EXEC_SUFFIXES = (".py", ".pyw", ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".vbs",
+                 ".rb", ".pl", ".php")
+EXEC_NAMES = ("makefile", "package.json", "justfile")
+META_REFUSAL = ("the .prophet/ folder is managed by Prophet itself (tools, memory, journal): write elsewhere; "
+                "use create_tool to add a tool and remember to store a note")
 MUTATING_TOOLS = ("write_file", "edit_file", "run_command", "python", "create_tool", "browse", "desktop")
 PERMISSION_MODES = ("smart", "ask", "auto")   # smart : le clone decide quand demander ; ask : toujours ; auto : jamais
 EFFORTS = ("auto", "fast", "deep")            # auto : budget de reflexion choisi par le clone
@@ -90,6 +113,43 @@ def _clip(x, n: int) -> str:
     return t if len(t) <= n else t[: n * 2 // 3] + " [...] " + t[-n // 3:]
 
 
+def _executable(path: str) -> bool:
+    n = Path(str(path).replace("\\", "/")).name.lower()
+    return n.endswith(EXEC_SUFFIXES) or n in EXEC_NAMES
+
+
+def _skill_tool(source: str) -> dict:
+    """TOOL d'une competence lu SANS executer son code (ast) : litteral Python, ou json.loads('...') du gabarit."""
+    tree = ast.parse(source)
+    tool = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "TOOL" for t in node.targets):
+            v = node.value
+            if isinstance(v, ast.Call) and getattr(v.func, "attr", getattr(v.func, "id", "")) == "loads" and len(v.args) == 1:
+                tool = json.loads(ast.literal_eval(v.args[0]))
+            else:
+                tool = ast.literal_eval(v)
+    if not isinstance(tool, dict) or not any(isinstance(n, ast.FunctionDef) and n.name == "run" for n in tree.body):
+        raise ValueError("a literal TOOL definition and def run(args) are required")
+    if not str(tool["function"]["name"]).isidentifier():
+        raise ValueError("the tool name must be a Python identifier")
+    return tool
+
+
+class Skill:
+    """Competence creee par Prophet. Le code lu au chargement est exactement celui qui s'execute, et seulement a
+    l'appel (que Prophet fait passer par le garde-fou) : rien ne tourne au chargement, rien ne change entre les deux."""
+
+    def __init__(self, path: Path, source: str):
+        self.path, self.source = path, source
+
+    def __call__(self, args: dict):
+        mod = types.ModuleType(f"prophet_skill_{self.path.stem}")
+        mod.__file__ = str(self.path)
+        exec(compile(self.source, str(self.path), "exec"), mod.__dict__)
+        return mod.run(args)
+
+
 class Workspace:
     def __init__(self, root: str | Path):
         self.root = Path(root).resolve()
@@ -105,6 +165,11 @@ class Workspace:
         if self.root not in p.parents and p != self.root:
             raise PermissionError(f"chemin hors de l'espace de travail : {rel}")
         return p
+
+    def in_meta(self, rel: str) -> bool:
+        """Chemin dans .prophet/ (competences executables, memoire, journal) ? Casse ignoree (Windows, macOS)."""
+        p, m = str(self.resolve(rel)).casefold(), str(self.meta).casefold()
+        return p == m or p.startswith(m + os.sep)
 
     def write(self, rel: str, content: str) -> dict:
         p = self.resolve(rel); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(content, encoding="utf-8")
@@ -234,15 +299,14 @@ class Workspace:
 
     # ---- outils crees par Prophet lui-meme ----------------------------------------------------------------
     def load_skills(self) -> dict[str, tuple[dict, Callable]]:
-        """Chaque `.prophet/skills/<nom>.py` definit TOOL (definition OpenAI) et run(args) -> dict."""
+        """Chaque `.prophet/skills/<nom>.py` definit TOOL (definition OpenAI litterale) et run(args) -> dict.
+        Lecture statique : aucun code de competence ne s'execute au chargement (voir Skill)."""
         out = {}
         for f in sorted(self.skills_dir.glob("*.py")):
             try:
-                spec = importlib.util.spec_from_file_location(f"prophet_skill_{f.stem}", f)
-                mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                tool, run = getattr(mod, "TOOL"), getattr(mod, "run")
-                name = tool["function"]["name"]
-                out[name] = (tool, (lambda a, _run=run: _run(a)))
+                src = f.read_text(encoding="utf-8")
+                tool = _skill_tool(src)
+                out[tool["function"]["name"]] = (tool, Skill(f, src))
             except Exception as e:  # une competence cassee ne doit pas bloquer l'agent
                 out[f"broken_{f.stem}"] = (_tool(f"broken_{f.stem}", f"Skill file {f.name} failed to load: {str(e)[:120]}", {}, []),
                                             lambda a, _e=str(e): {"ok": False, "error": _e})
@@ -258,17 +322,50 @@ def run(args):
 '''
 
 
+class _MeteredS1:
+    """Le clone vu par les outils judge_* du tour : chaque appel compte dans la latence S1 du tour."""
+
+    def __init__(self, prophet: "Prophet"):
+        self.prophet = prophet
+
+    def answer(self, req):
+        return self.prophet._s1(req)
+
+
+class _TurnToolbox(SystemOneToolbox):
+    """Outils judge_* d'un tour : comptes (latence S1) et inscrits au journal du tour comme les autres outils."""
+
+    def __init__(self, prophet: "Prophet", calls: list[dict]):
+        super().__init__(_MeteredS1(prophet))
+        self.calls = calls
+
+    def call(self, name: str, args: dict) -> dict:
+        t0 = time.perf_counter()
+        rec = {"tool": name, "question": str(args.get("question", ""))[:200]}
+        try:
+            r = super().call(name, args)
+        except Exception as e:
+            self.calls.append({**rec, "ok": False, "error": str(e)[:200]})
+            raise
+        self.calls.append({**rec, "ok": True, "ms": round((time.perf_counter() - t0) * 1000, 1)})
+        return r
+
+
 class Prophet:
     """on_event(evt) : flux d'evenements pour une interface (decision System One, texte diffuse, outils, verification).
     should_stop() : annulation cooperative. permission_mode : smart | ask | auto (voir PERMISSION_MODES).
-    plan_mode : lecture seule, Bonsai rend un plan. max_context_chars : compaction de la boucle d'agent."""
+    plan_mode : lecture seule, Bonsai rend un plan. max_context_chars : compaction de la boucle d'agent.
+    danger_threshold : masse de probabilite destructive + privileged + exfiltration a partir de laquelle le mode smart
+    demande (la masse benigne doit l'emporter nettement, pas seulement l'argmax). reroute_below : verification S1 sous
+    laquelle une reponse directe est reprise en voie agent. thinking_share : part maximale de max_tokens pour la reflexion."""
 
     def __init__(self, s1_engine, s2_backend, workspace: Workspace, confirm: Callable[[str, dict], bool] | None = None,
                  ledger: str | Path | None = None, max_turns: int = 16, risk_confirm_level: int = 2,
                  budgets: tuple[int, ...] = (0, 512, 2048, 6144), command_timeout: int = 180, max_tools: int = 12,
                  browser_factory: Callable | None = None, on_event: Callable[[dict], None] | None = None,
                  should_stop: Callable[[], bool] | None = None, permission_mode: str = "smart", plan_mode: bool = False,
-                 max_context_chars: int | None = None, max_tokens: int = 4096, desktop_factory: Callable | None = None):
+                 max_context_chars: int | None = None, max_tokens: int = 4096, desktop_factory: Callable | None = None,
+                 danger_threshold: float = 0.35, reroute_below: float = 0.35, thinking_share: float = 0.6):
         self.s1, self.s2, self.ws = s1_engine, s2_backend, workspace
         self.confirm = confirm or (lambda cmd, judged: False)
         self.ledger = Path(ledger) if ledger else workspace.meta / "ledger.jsonl"
@@ -282,6 +379,8 @@ class Prophet:
         self.permission_mode, self.plan_mode = permission_mode, plan_mode
         self.max_context_chars, self.max_tokens = max_context_chars, max_tokens
         self.desktop_factory = desktop_factory
+        self.danger_threshold, self.reroute_below, self.thinking_share = danger_threshold, reroute_below, thinking_share
+        self._s1_ms, self._s1_calls = 0.0, 0
 
     def _emit(self, evt: dict) -> None:
         if self.on_event is not None:
@@ -290,94 +389,164 @@ class Prophet:
             except Exception:
                 pass
 
-    # ---- garde-fou -----------------------------------------------------------------------------------------
-    def judge(self, request: str, proposed: str) -> dict:
+    def _s1(self, req):
+        """Tout appel au clone passe ici : la latence S1 d'un tour est la somme de tous ses appels (echecs compris)."""
+        t0 = time.perf_counter()
         try:
-            r = self.s1.answer({"state": {"user_request": _clip(request, 1200), "proposed_action": _clip(proposed, 2000)},
-                                "questions": {"tool_risk": GUARDRAILS["tool_risk"], "risk": GUARDRAILS["risk"], "policy_violation": GUARDRAILS["policy_violation"]}})
-        except Exception as e:   # classifieur indisponible : prudence, on demande
-            return {"tool_risk": "unknown", "tool_risk_conf": 0.0, "risk": 2.0, "policy_violation": 0.0, "needs_confirmation": True,
-                    "latency_ms": 0.0, "s1_error": str(e)[:200]}
+            return self.s1.answer(req)
+        finally:
+            self._s1_ms += (time.perf_counter() - t0) * 1000
+            self._s1_calls += 1
+
+    # ---- garde-fou -----------------------------------------------------------------------------------------
+    def judge(self, request: str, proposed: str, chunk: int = 2000, max_chunks: int = 6) -> dict:
+        """Risque d'une action selon le clone. Une action longue est jugee en entier, par morceaux (le pire l'emporte) ;
+        au-dela de max_chunks, la partie non vue impose un arret humain."""
+        parts = [proposed[i:i + chunk] for i in range(0, len(proposed), chunk)] or [""]
+        partial = len(parts) > max_chunks
+        if partial:
+            parts = parts[: max_chunks - 1] + parts[-1:]
+        head = proposed.split("\n", 1)[0][:160]   # l'action (outil, fichier) accompagne chaque morceau
+        verdicts = []
+        for k, part in enumerate(parts):
+            label = part if len(parts) == 1 else f"{head}\n[part {k + 1} of {len(parts)}{' (middle omitted before)' if partial and k == len(parts) - 1 else ''}]\n{part}"
+            verdicts.append(self._judge_one(request, label))
+            if "s1_error" in verdicts[-1]:
+                break
+        j = dict(max(verdicts, key=lambda v: (v["hard_stop"], v["needs_confirmation"], v["p_risky"], v["risk"])))
+        j["latency_ms"] = round(sum(v["latency_ms"] for v in verdicts), 2)
+        if len(parts) > 1:
+            j["chunks"] = len(parts)
+        if partial:   # une partie de ce qui va s'executer n'a pas ete vue par le juge : on demande, toujours
+            j.update(partial=True, needs_confirmation=True, hard_stop=True)
+        return j
+
+    def _judge_one(self, request: str, proposed: str) -> dict:
+        try:
+            r = self._s1({"state": {"user_request": _clip(request, 1200), "proposed_action": proposed},
+                          "questions": {"tool_risk": GUARDRAILS["tool_risk"], "risk": GUARDRAILS["risk"], "policy_violation": GUARDRAILS["policy_violation"]}})
+        except Exception as e:   # classifieur indisponible : prudence, on demande (et aucune autorisation memorisee ne vaut)
+            return {"s1_consulted": True, "tool_risk": "unknown", "tool_risk_conf": 0.0, "p_risky": 1.0, "risk": 2.0, "policy_violation": 0.0,
+                    "needs_confirmation": True, "hard_stop": True, "latency_ms": 0.0, "s1_error": str(e)[:200]}
         a = r.answers
-        j = {"tool_risk": a["tool_risk"].choice, "tool_risk_conf": a["tool_risk"].confidence, "risk": a["risk"].score, "policy_violation": a["policy_violation"].noul}
-        j["needs_confirmation"] = j["tool_risk"] in ("destructive", "privileged", "exfiltration") or round(j["risk"]) >= self.risk_confirm_level or j["policy_violation"] >= 0.5
+        p_risky = sum(a["tool_risk"].probabilities.get(c, 0.0) for c in RISKY_TOOL_CLASSES)
+        j = {"s1_consulted": True, "tool_risk": a["tool_risk"].choice, "tool_risk_conf": a["tool_risk"].confidence,
+             "p_risky": round(p_risky, 4), "risk": a["risk"].score, "policy_violation": a["policy_violation"].noul}
+        # arret humain obligatoire, meme pour un outil « toujours autorise » : danger probable, politique, risque maximal
+        j["hard_stop"] = j["tool_risk"] in RISKY_TOOL_CLASSES or p_risky >= 0.5 or j["policy_violation"] >= 0.5 or j["risk"] >= 2.5
+        # incertitude : readonly + workspace_write doivent l'emporter avec une marge, l'argmax ne suffit pas
+        j["needs_confirmation"] = j["hard_stop"] or p_risky >= self.danger_threshold or j["risk"] >= self.risk_confirm_level - 0.5
         j["latency_ms"] = r.latency_ms
         return j
 
     def _guarded(self, request: str, calls: list[dict], kind: str, describe: str, action: Callable[[], dict], record: dict,
                  judge: bool = True, preview: dict | None = None) -> dict:
-        """Politique d'autorisation. plan : toute action qui modifie est refusee. auto : jamais de question.
-        smart : le clone juge l'action (~100 ms) et ne demande que si elle est risquee. ask : on demande toujours."""
+        """Politique d'autorisation. plan : toute action qui modifie est refusee. auto : jamais de question (le clone
+        n'est pas consulte). smart : le clone juge l'action et on ne demande que si elle est risquee ou incertaine.
+        ask : on demande toujours. Le verdict passe a confirm() porte hard_stop (arret humain obligatoire)."""
         if self.plan_mode:
             calls.append({"tool": kind, **record, "blocked": True, "plan_mode": True})
             return {"ok": False, "blocked": True, "reason": "plan mode: no changes allowed; finish with done and a plan"}
-        judged = {"tool_risk": "workspace_write", "tool_risk_conf": 1.0, "risk": 0.0, "policy_violation": 0.0, "needs_confirmation": False}
-        if judge and self.permission_mode != "auto":
-            judged = self.judge(request, describe)
-        ask = self.permission_mode == "ask" or (self.permission_mode == "smart" and judged["needs_confirmation"])
-        if ask:
-            judged = {**judged, "tool": kind, "preview": preview or {}}
-            if not self.confirm(describe, judged):
-                calls.append({"tool": kind, **record, "blocked": True, "judged": judged})
-                return {"ok": False, "blocked": True, "reason": "the user declined this action", "judged": {k: v for k, v in judged.items() if k != "preview"}}
-        r = action()
-        calls.append({"tool": kind, **record, "ok": r.get("ok"), "judged": {k: v for k, v in judged.items() if k != "preview"}})
+        judged = self.judge(request, describe) if judge and self.permission_mode != "auto" else None
+        log = {"judged": judged} if judged is not None else {"judged": None, "s1_consulted": False}
+        ask = self.permission_mode == "ask" or (self.permission_mode == "smart" and judged is not None and judged["needs_confirmation"])
+        if ask and not self.confirm(describe, {**(judged or {"s1_consulted": False}), "tool": kind, "preview": preview or {}}):
+            calls.append({"tool": kind, **record, "blocked": True, **log})
+            return {"ok": False, "blocked": True, "reason": "the user declined this action", "judged": judged}
+        try:
+            r = action()
+        except Exception as e:   # l'echec de l'outil est rendu au modele et journalise
+            r = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}"}
+        calls.append({"tool": kind, **record, "ok": r.get("ok") if isinstance(r, dict) else True, **log, **({"confirmed": True} if ask else {})})
         return r
+
+    def _scripts_of(self, cmd: str, max_files: int = 2, max_chars: int = 2400) -> str:
+        """Contenu (debut + fin, borne) des scripts du workspace qu'une commande lance : le juge voit ce qui va tourner,
+        pas seulement `python x.py`."""
+        out, seen = [], set()
+        for a, b, c in re.findall(r'"([^"]+)"|\'([^\']+)\'|([^\s;&|<>()`\'"]+)', cmd):
+            tok = (a or b or c).strip()
+            if not _executable(tok) or tok in seen:
+                continue
+            seen.add(tok)
+            try:
+                p = self.ws.resolve(tok)
+            except (PermissionError, OSError, ValueError):   # hors du workspace : la commande elle-meme est jugee
+                continue
+            if p.is_file():
+                out.append(f"\n--- content of {tok} ---\n" + _clip(p.read_text(encoding="utf-8", errors="replace"), max_chars))
+                if len(out) >= max_files:
+                    break
+        return "".join(out)
+
+    def _skill(self, request: str, calls: list[dict], name: str, skill: Skill) -> Callable:
+        """Appel d'une competence creee par Prophet : garde-fou comme run_command, le juge voit les arguments et le code."""
+        def call(a):
+            args = json.dumps(a, ensure_ascii=False, default=str)
+            return self._guarded(request, calls, name, f"run the self-made tool `{name}` with arguments {_clip(args, 600)}; its code:\n{skill.source}",
+                                 lambda: skill(a), {"skill": True, "args": _clip(args, 200)}, preview={"code": skill.source[:6000]})
+        return call
 
     # ---- catalogue d'outils ------------------------------------------------------------------------------------
     def _catalog(self, request: str, calls: list[dict]) -> dict[str, tuple[dict, Callable]]:
         ws = self.ws
 
+        def guard_write(exe: bool) -> bool:   # smart : seuls les fichiers executables sont juges (python x.py suivra)
+            return self.permission_mode == "ask" or self.plan_mode or (exe and self.permission_mode == "smart")
+        def meta_refused(tool: str, path: str) -> dict:   # .prophet/skills/*.py serait execute aux tours suivants
+            calls.append({"tool": tool, "path": path, "ok": False, "blocked": True, "meta": True})
+            return {"ok": False, "blocked": True, "error": META_REFUSAL}
         def write_file(a):
             path, content = a["path"], a["content"]
-            if self.permission_mode == "ask" or self.plan_mode:
+            if ws.in_meta(path):
+                return meta_refused("write_file", path)
+            exe = _executable(path)
+            if guard_write(exe):
                 before = ws.resolve(path).read_text(encoding="utf-8", errors="replace") if ws.resolve(path).exists() else ""
-                return self._guarded(request, calls, "write_file", f"write {path} ({len(content)} chars)", lambda: ws.write_with_diff(path, content),
-                                     {"path": path}, judge=False, preview={"diff": ws._diff(path, before, content)})
+                return self._guarded(request, calls, "write_file", f"write {path} ({len(content)} chars)" + (f":\n{content}" if exe else ""),
+                                     lambda: ws.write_with_diff(path, content), {"path": path}, judge=exe,
+                                     preview={"diff": ws._diff(path, before, content)})
             r = ws.write_with_diff(path, content); calls.append({"tool": "write_file", "path": path, "ok": r.get("ok")}); return r
         def edit_file(a):
             path, old, new, rep = a["path"], a.get("old_string", ""), a.get("new_string", ""), bool(a.get("replace_all", False))
-            if self.permission_mode == "ask" or self.plan_mode:
-                return self._guarded(request, calls, "edit_file", f"edit {path}", lambda: ws.edit(path, old, new, rep), {"path": path},
-                                     judge=False, preview={"old": old[:4000], "new": new[:4000]})
+            if ws.in_meta(path):
+                return meta_refused("edit_file", path)
+            exe = _executable(path)
+            if guard_write(exe):
+                return self._guarded(request, calls, "edit_file", f"edit {path}" + (f": replace\n{old}\n--- with ---\n{new}" if exe else ""),
+                                     lambda: ws.edit(path, old, new, rep), {"path": path}, judge=exe, preview={"old": old[:4000], "new": new[:4000]})
             r = ws.edit(path, old, new, rep); calls.append({"tool": "edit_file", "path": path, "ok": r.get("ok")}); return r
         def run_command(a):
             cmd = a["command"]
-            return self._guarded(request, calls, "run_command", f"shell: {cmd}", lambda: ws.run(cmd, timeout=self.command_timeout), {"command": cmd},
-                                 preview={"command": cmd})
+            return self._guarded(request, calls, "run_command", f"shell: {cmd}" + self._scripts_of(cmd), lambda: ws.run(cmd, timeout=self.command_timeout),
+                                 {"command": cmd}, preview={"command": cmd})
         def python(a):
             code = a["code"]
-            return self._guarded(request, calls, "python", f"python code:\n{code[:1500]}",
+            return self._guarded(request, calls, "python", f"python code:\n{code}",
                                  lambda: ws.run_python(code, timeout=self.command_timeout), {"code": code[:200]}, preview={"code": code[:6000]})
         def create_tool(a):
             name, desc, params, body = a["name"], a["description"], a.get("parameters") or {"type": "object", "properties": {}}, a["python_body"]
-            if not name.isidentifier():
-                return {"ok": False, "error": "name must be a Python identifier"}
+            if not name.isidentifier() or name in BUILTIN_TOOLS or name.startswith(("judge_", "broken_")):
+                return {"ok": False, "error": "name must be a Python identifier that is not a built-in tool name"}
             if isinstance(params, str):
                 params = json.loads(params)
             src = SKILL_TEMPLATE.format(name=name, tool_json=json.dumps(_tool(name, desc, params.get("properties", {}), params.get("required", []))),
                                         body="\n".join("    " + line for line in body.splitlines()) or "    return {}")
             def do():
-                path = ws.skills_dir / f"{name}.py"; path.write_text(src, encoding="utf-8")
-                try:
-                    spec = importlib.util.spec_from_file_location(f"prophet_skill_{name}", path)
-                    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)  # type: ignore[union-attr]
-                    getattr(mod, "TOOL"); getattr(mod, "run")
+                try:   # verification sans rien executer : definition litterale et code compilable
+                    _skill_tool(src); compile(src, f"{name}.py", "exec")
                 except Exception as e:
-                    path.unlink(missing_ok=True)
                     return {"ok": False, "error": f"the tool does not load: {str(e)[:300]}"}
+                (ws.skills_dir / f"{name}.py").write_text(src, encoding="utf-8")
                 return {"ok": True, "tool": name, "note": "available from the next turn (and now via run_command if needed)"}
-            return self._guarded(request, calls, "create_tool", f"new tool `{name}`: {desc}\n{body[:1500]}", do, {"name": name},
+            return self._guarded(request, calls, "create_tool", f"new tool `{name}`: {desc}\n{body}", do, {"name": name},
                                  preview={"code": body[:6000]})
         def browse(a):
-            if self.browser_factory is None:
-                calls.append({"tool": "browse", "goal": a["goal"]})
-                return {"ok": False, "error": "browser not configured"}
-            if self.plan_mode:
-                calls.append({"tool": "browse", "goal": a["goal"], "blocked": True, "plan_mode": True})
-                return {"ok": False, "blocked": True, "reason": "plan mode: browsing that fills forms is not allowed"}
-            calls.append({"tool": "browse", "goal": a["goal"]})
-            return self.browser_factory()(a["goal"], a.get("url"), a.get("slots") or {})
+            goal, url, slots = a["goal"], a.get("url"), a.get("slots") or {}
+            return self._guarded(request, calls, "browse", f"web browser: {goal}" + (f" (start at {url})" if url else "")
+                                 + (f"; values it may type into web forms: {json.dumps(slots, ensure_ascii=False)}" if slots else ""),
+                                 lambda: self.browser_factory()(goal, url, slots), {"goal": goal},
+                                 preview={"command": f"navigateur : {goal}" + (f" · {url}" if url else "")})
         def desktop(a):
             goal, app = a["goal"], a.get("app")
             return self._guarded(request, calls, "desktop", f"control the computer desktop: {goal}" + (f" (open {app})" if app else ""),
@@ -389,6 +558,8 @@ class Prophet:
             calls.append({"tool": "done"}); return {"__stop__": True, "summary": a.get("summary", "")}
         def read_file(a):
             calls.append({"tool": "read_file", "path": a["path"]}); return ws.read(a["path"])
+        def list_files(a):
+            calls.append({"tool": "list_files", "path": a.get("path", ".")}); return ws.listing(a.get("path", "."))
         def glob_files(a):
             calls.append({"tool": "glob", "pattern": a["pattern"]}); return ws.glob(a["pattern"])
         def grep(a):
@@ -401,36 +572,41 @@ class Prophet:
                                 {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}},
                                 ["path", "old_string", "new_string"]), edit_file),
             "read_file": (_tool("read_file", "Read a text file from the workspace.", {"path": {"type": "string"}}, ["path"]), read_file),
-            "list_files": (_tool("list_files", "List files under a workspace directory.", {"path": {"type": "string"}}, []), lambda a: ws.listing(a.get("path", "."))),
+            "list_files": (_tool("list_files", "List files under a workspace directory.", {"path": {"type": "string"}}, []), list_files),
             "glob": (_tool("glob", "Find files by name pattern, e.g. '**/*.py' or '*.md'.", {"pattern": {"type": "string"}}, ["pattern"]), glob_files),
             "grep": (_tool("grep", "Search file contents with a regular expression; returns path:line: text.",
                            {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}, "ignore_case": {"type": "boolean"}}, ["pattern"]), grep),
             "run_command": (_tool("run_command", f"Run a {SHELL_NAME} command in the workspace (tests, builds, installs, running apps).", {"command": {"type": "string"}}, ["command"]), run_command),
             "python": (_tool("python", "Run a Python snippet in the workspace and return its output.", {"code": {"type": "string"}}, ["code"]), python),
-            "browse": (_tool("browse", "Achieve a goal in a web browser (search, read, fill forms). Give the goal, optionally a start URL and slot values to type.",
-                             {"goal": {"type": "string"}, "url": {"type": "string"}, "slots": {"type": "object"}}, ["goal"]), browse),
             "remember": (_tool("remember", "Store a durable note about the user or the project.", {"note": {"type": "string"}}, ["note"]), remember),
             "create_tool": (_tool("create_tool", "Build a new reusable tool for yourself: a Python function body (args: dict) -> dict, with a name, description and JSON-schema parameters. It becomes available on later turns.",
                                   {"name": {"type": "string"}, "description": {"type": "string"}, "parameters": {"type": "object"}, "python_body": {"type": "string"}},
                                   ["name", "description", "python_body"]), create_tool),
             "done": (_tool("done", "Finish with a short summary (what exists now, how to run it, what is missing, or your one clarifying question).", {"summary": {"type": "string"}}, ["summary"]), done),
         }
+        if self.browser_factory is not None:   # pas de navigateur configure : l'outil n'est pas propose
+            cat["browse"] = (_tool("browse", "Achieve a goal in a web browser (search, read, fill forms). Give the goal, optionally a start URL and slot values to type.",
+                                   {"goal": {"type": "string"}, "url": {"type": "string"}, "slots": {"type": "object"}}, ["goal"]), browse)
         if self.desktop_factory is not None:
             cat["desktop"] = (_tool("desktop", "Operate desktop applications like a person (click buttons, fill fields, shortcuts, open apps) to reach a goal. "
                                     "Optionally give the app to open first and slot values to type.",
                                     {"goal": {"type": "string"}, "app": {"type": "string"}, "slots": {"type": "object"}}, ["goal"]), desktop)
-        cat.update(ws.load_skills())
+        if not self.plan_mode:   # mode plan : les competences ne sont ni chargees ni executees
+            for name, (tool, fn) in ws.load_skills().items():
+                if name in cat or name in BUILTIN_TOOLS or name.startswith("judge_"):   # jamais a la place d'un outil de base
+                    continue
+                cat[name] = (tool, self._skill(request, calls, name, fn) if isinstance(fn, Skill) else fn)
         return cat
 
-    def _select_tools(self, request: str, catalog: dict, pre: dict) -> list[str]:
-        """Pertinence par outil (un noul chacun, une passe) : ordre de presentation, et filtre au-dela de max_tools.
-        Les outils de base (done, remember, create_tool) restent toujours exposes."""
+    def _select_tools(self, request: str, catalog: dict, pre: dict, recent: list[dict] | None = None) -> list[str]:
+        """Pertinence par outil (un noul chacun, une passe, avec les derniers echanges) : ordre de presentation, et filtre
+        au-dela de max_tools. Les outils de base (done, remember, create_tool) restent toujours exposes."""
         names = [n for n in catalog if n not in CORE_TOOLS]
         if not names:
             return list(CORE_TOOLS)
         qs = {f"t_{n}": {"type": "noul", "instructions": f"Would the tool `{n}` ({catalog[n][0]['function']['description'][:120]}) plausibly be useful for this request?"} for n in names}
         try:
-            r = self.s1.answer({"state": {"request": _clip(request, 2000)}, "questions": qs})
+            r = self._s1({"state": {"request": _clip(request, 2000), "recent_turns": recent or []}, "questions": qs})
         except Exception:
             return names[: max(1, self.max_tools - len(CORE_TOOLS))] + [c for c in CORE_TOOLS if c in catalog]
         ranked = sorted(names, key=lambda n: -r.answers[f"t_{n}"].noul)
@@ -447,20 +623,69 @@ class Prophet:
             budget = 0
         elif effort == "deep":
             budget = self.budgets[-1]
-        return budget, risk_level
+        return self._cap(budget), risk_level
+
+    def _cap(self, budget: int) -> int:
+        """La reflexion ne consomme jamais toute la generation : il reste de quoi repondre ou appeler un outil."""
+        return min(budget, int(self.max_tokens * self.thinking_share))
+
+    def _verify(self, request: str, response: str) -> float | None:
+        try:
+            v = self._s1({"state": {"request": _clip(request, 1500), "response": _clip(response, 2500), "files": self.ws.listing()["entries"][:60]},
+                          "questions": {"ok": {"type": "noul", "instructions": "Does the response (and the workspace state) satisfy the user's request?"}}})
+            return round(v.answers["ok"].noul, 3)
+        except Exception:
+            return None
+
+    # ---- voie directe ---------------------------------------------------------------------------------------------
+    def _direct(self, request: str, history: list[dict], pre: dict, memory: str, track: Callable[[dict], None]) -> Turn:
+        system = DIRECT_PROMPT.format(platform=f"{platform.system()} {platform.release()}", memory=memory)
+        kw: dict = {}
+        if self.on_event is not None:
+            def on_delta(d: dict) -> None:
+                if d["type"] in ("content", "reasoning"):
+                    self._emit({"type": "text.delta" if d["type"] == "content" else "thinking.delta", "text": d["text"]})
+            kw = {"on_delta": on_delta, "should_stop": self.should_stop}
+            self._emit({"type": "llm.start", "turn": 0, "thinking_budget": 0})
+        resp = self.s2.chat([{"role": "system", "content": system}, *history[-6:], {"role": "user", "content": request}],
+                            max_tokens=600, thinking_budget=0, temperature=0.5, **kw)
+        finish = resp["choices"][0].get("finish_reason")
+        track({"type": "llm.end", "turn": 0, "timings": resp.get("timings") or {}, "usage": resp.get("usage") or {}, "finish_reason": finish})
+        a = (resp["choices"][0]["message"].get("content") or "").strip()
+        return Turn(request, pre, "direct", a, stopped_by="cancelled" if resp.get("cancelled") else "length" if finish == "length" else "final")
+
+    def _reroute_reason(self, request: str, turn: Turn) -> str | None:
+        """Une voie directe ratee est reprise en voie agent : reponse vide, NEEDS_TOOLS, tronquee, qui pretend avoir agi,
+        ou verification S1 trop basse. Sinon la verification calculee ici reste celle du tour."""
+        if turn.stopped_by == "cancelled" or self.should_stop():
+            return None
+        text = turn.response
+        if not text:
+            return "empty"
+        if text.lstrip().upper().startswith(NEEDS_TOOLS):
+            return "needs_tools"
+        if turn.stopped_by == "length":
+            return "truncated"
+        if CLAIMS_ACTION.search(text):
+            return "claims_action"
+        turn.verification = self._verify(request, text)
+        if turn.verification is not None and turn.verification < self.reroute_below:
+            return "low_verification"
+        return None
 
     # ---- un tour --------------------------------------------------------------------------------------------------
     def handle(self, request: str, history: list[dict] | None = None, effort: str = "auto") -> Turn:
         t0 = time.perf_counter()
         history = history or []
+        self._s1_ms, self._s1_calls = 0.0, 0
         self._emit({"type": "turn.start", "request": request, "plan_mode": self.plan_mode, "permission_mode": self.permission_mode, "effort": effort})
         files = self.ws.listing()["entries"]
         # le classifieur lit ~2 k tokens par slot (4 slots sur 8 k) : on borne ce qu'on lui montre
         recent = [{"role": m.get("role"), "content": _clip(m.get("content"), 400)} for m in history[-4:]]
         s1_ms = 0.0
         try:
-            pre_resp = self.s1.answer({"state": {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent},
-                                       "questions": PROPHET_TURN})
+            pre_resp = self._s1({"state": {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent},
+                                 "questions": PROPHET_TURN})
             pre = {k: v.model_dump(exclude={"legend"}) for k, v in pre_resp.answers.items()}
             s1_ms = pre_resp.latency_ms
         except Exception as e:   # le clone accelere et protege, il n'est jamais un point de panne : Bonsai continue seul
@@ -472,12 +697,9 @@ class Prophet:
         self._emit({"type": "s1.decision", "pre": pre, "latency_ms": s1_ms, "budget": budget, "risk_level": risk_level,
                     "path": "direct" if direct else "agent"})
         memory = self.ws.memory()
-        system = SYSTEM_PROMPT.format(workspace=self.ws.root, platform=f"{platform.system()} {platform.release()}", shell=SHELL_NAME,
-                                      memory=("\nWhat you remember about the user:\n- " + "\n- ".join(memory)) if memory else "")
-        if self.plan_mode:
-            system += PLAN_MODE_NOTE
+        memory_note = ("\nWhat you remember about the user:\n- " + "\n- ".join(memory)) if memory else ""
         calls: list[dict] = []
-        stats: dict = {"s1_ms": s1_ms, "llm_calls": 0, "tokens": 0, "tok_s": None, "prompt_ms": 0.0}
+        stats: dict = {"s1_ms": 0.0, "llm_calls": 0, "tokens": 0, "tok_s": None, "prompt_ms": 0.0}
 
         def track(evt: dict) -> None:
             if evt.get("type") == "llm.end":
@@ -492,28 +714,31 @@ class Prophet:
                 stats["ctx_tokens"] = max(stats.get("ctx_tokens", 0), used)   # contexte occupe au plus haut du tour
             self._emit(evt)
 
-        if direct:
-            kw: dict = {}
-            if self.on_event is not None:
-                def on_delta(d: dict) -> None:
-                    if d["type"] in ("content", "reasoning"):
-                        self._emit({"type": "text.delta" if d["type"] == "content" else "thinking.delta", "text": d["text"]})
-                kw = {"on_delta": on_delta, "should_stop": self.should_stop}
-                self._emit({"type": "llm.start", "turn": 0, "thinking_budget": 0})
-            resp = self.s2.chat([{"role": "system", "content": system}, *history[-6:], {"role": "user", "content": request}],
-                                max_tokens=600, thinking_budget=0, temperature=0.5, **kw)
-            track({"type": "llm.end", "turn": 0, "timings": resp.get("timings") or {}, "usage": resp.get("usage") or {}})
-            a = (resp["choices"][0]["message"].get("content") or "").strip()
-            turn = Turn(request, pre, "direct", a, stopped_by="cancelled" if resp.get("cancelled") else "final")
-        else:
+        turn = self._direct(request, history, pre, memory_note, track) if direct else None
+        if turn is not None:
+            reason = self._reroute_reason(request, turn)
+            if reason:   # le clone s'est trompe de voie : Bonsai reprend le tour avec les outils (l'interface le montre)
+                pre["rerouted"] = {"reason": reason, "verification": turn.verification}
+                self._emit({"type": "s1.reroute", "reason": reason, "verification": turn.verification, "from": "direct", "to": "agent"})
+                if effort != "fast":
+                    budget = self._cap(max(budget, self.budgets[1]))
+                turn = None
+        if turn is None:
+            system = SYSTEM_PROMPT.format(workspace=self.ws.root, platform=f"{platform.system()} {platform.release()}", shell=SHELL_NAME,
+                                          memory=memory_note)
+            if self.plan_mode:
+                system += PLAN_MODE_NOTE
             catalog = self._catalog(request, calls)
-            exposed = self._select_tools(request, catalog, pre)
+            exposed = self._select_tools(request, catalog, pre, recent)
             self._emit({"type": "s1.tools", "relevance": pre.get("tool_relevance", {}), "exposed": exposed})
             tools = {n: catalog[n] for n in exposed}
-            loop = AgentLoop(self.s2, self.toolbox, tools, max_turns=self.max_turns, thinking_budget=budget, max_tokens=self.max_tokens,
+            loop = AgentLoop(self.s2, _TurnToolbox(self, calls), tools, max_turns=self.max_turns, thinking_budget=budget, max_tokens=self.max_tokens,
                              on_event=track if self.on_event is not None else None, should_stop=self.should_stop,
                              max_context_chars=self.max_context_chars)
-            hint = f"(Fast judge: clarify={pre['clarify']['noul']:.2f}, needs_reasoning={pre['needs_reasoning']['noul']:.2f}, risk={risk_level}. Not exposed but creatable: any tool you need.)"
+            if pre.get("s1_error"):   # pas d'indice fabrique : Bonsai sait que le juge rapide est absent
+                hint = "(Fast judge unavailable this turn: no hint, decide by yourself. Not exposed but creatable: any tool you need.)"
+            else:
+                hint = f"(Fast judge: clarify={pre['clarify']['noul']:.2f}, needs_reasoning={pre['needs_reasoning']['noul']:.2f}, risk={risk_level}. Not exposed but creatable: any tool you need.)"
             # apercu de l'espace de travail dans le message (pas dans le prompt systeme : le prefixe mis en cache reste stable)
             # -> souvent un aller-retour d'outil de moins, soit plusieurs secondes sur un 27B
             hint += ("\n(Workspace: " + ", ".join(files[:40]) + (f", ... {len(files) - 40} more" if len(files) > 40 else "") + ")") if files else "\n(Workspace is empty.)"
@@ -521,14 +746,10 @@ class Prophet:
             summary = next((c["result"].get("summary") for s in reversed(res.steps) for c in s.tool_calls if c["name"] == "done" and isinstance(c["result"], dict)), None)
             turn = Turn(request, pre, "agent", summary or (res.content or "").strip() or "(no summary)", tool_calls=calls, tools_exposed=exposed,
                         stopped_by=res.stopped_by)
-        if turn.stopped_by != "cancelled":
-            try:
-                v = self.s1.answer({"state": {"request": _clip(request, 1500), "response": _clip(turn.response, 2500), "files": self.ws.listing()["entries"][:60]},
-                                    "questions": {"ok": {"type": "noul", "instructions": "Does the response (and the workspace state) satisfy the user's request?"}}})
-                turn.verification = round(v.answers["ok"].noul, 3)
-            except Exception:
-                turn.verification = None
+            if turn.stopped_by != "cancelled":
+                turn.verification = self._verify(request, turn.response)
         turn.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        stats["s1_ms"], stats["s1_calls"] = round(self._s1_ms, 1), self._s1_calls   # toutes les lectures S1 du tour
         turn.stats = stats
         self._emit({"type": "turn.end", "path": turn.path, "response": turn.response, "verification": turn.verification,
                     "latency_ms": turn.latency_ms, "stopped_by": turn.stopped_by, "stats": stats, "tools_exposed": turn.tools_exposed})
@@ -581,7 +802,9 @@ def repl(prophet: Prophet) -> None:
 
 
 def confirm_in_terminal(describe: str, judged: dict) -> bool:
-    print(f"\n[garde-fou] action jugee {judged['tool_risk']} (risque {judged['risk']:.1f}) :\n{describe[:600]}")
+    tr, risk = judged.get("tool_risk"), judged.get("risk")
+    verdict = f"action jugee {tr} (risque {risk:.1f})" if tr and risk is not None else "action non jugee par le classifieur"
+    print(f"\n[garde-fou] {verdict} :\n{describe[:600]}")
     try:
         return input("executer ? [o/N] ").strip().lower() in ("o", "y", "oui", "yes")
     except EOFError:
