@@ -91,13 +91,13 @@ def main(argv=None) -> None:
     if os.name != "nt":
         os.chmod(paths.core_info, 0o600)
 
-    from prophet_studio.server import Studio, build_app
+    from prophet_studio.server import Studio, build_app, release_core_info
     studio = Studio(paths, token, port, demo=args.demo, dev=args.dev)
     app = build_app(studio)
 
     def cleanup() -> None:
         studio.runtime.stop()
-        paths.core_info.unlink(missing_ok=True)
+        release_core_info(paths)   # seulement s'il decrit ce processus (une autre instance a pu le reecrire)
 
     if args.parent_pid:
         _watch_parent(args.parent_pid, cleanup)   # suivi de os._exit : ni lifespan ni atexit
@@ -109,7 +109,16 @@ def main(argv=None) -> None:
 
     print(f"Prophet Studio {'(demo) ' if args.demo else ''}-> {url}", flush=True)
     import uvicorn
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False))
+
+    class Server(uvicorn.Server):
+        def handle_exit(self, sig, frame) -> None:
+            # Ctrl+C / SIGTERM : les modeles s'arretent tout de suite (hors du gestionnaire de signal), sans attendre la fin
+            # des requetes en cours, et le watchdog est desarme : sous Unix, Ctrl+C atteint aussi les llama-server (meme groupe
+            # de processus que le coeur), il ne doit pas les relancer
+            threading.Thread(target=studio.runtime.stop, daemon=True, name="runtime-stop").start()
+            super().handle_exit(sig, frame)
+
+    server = Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False))
 
     def announce():
         # PROPHET_READY et le navigateur seulement une fois le port a l'ecoute (machine lente, premier lancement)

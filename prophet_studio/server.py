@@ -197,7 +197,26 @@ class Studio:
         return {"type": "metrics", "gpu": m, "runtime": self.runtime.state, "running": list(self.agent.running)}
 
     # ---- banc de mesure -------------------------------------------------------------------------------------------------
+    BENCH_SERIES = {"s1_p50_ms": "petit etat deja en cache (meilleur cas)",
+                    "s1_cold": "etat Prophet neuf (~2 k tokens, nonce aleatoire en tete : lu en entier, comme a chaque tour)",
+                    "s1_warm": "le meme etat Prophet relu (en cache)"}
+
+    @staticmethod
+    def _bench_state() -> dict:
+        """Etat de la forme d'un tour Prophet (prophet.handle : demande bornee a 2500 caracteres, 60 fichiers, 4 tours de 400)
+        avec un nonce en tete : ni le cache du slot ni --cache-ram ne le connaissent, le serveur le lit en entier."""
+        import uuid
+        req = f"[{uuid.uuid4().hex}] " + " ".join(f"Update src/pkg_{i % 6}/module_{i}.py so export step {i} retries on timeouts, "
+                                                   "logs the failing record and keeps the batch going." for i in range(24))
+        turns = [{"role": "user" if i % 2 == 0 else "assistant",
+                  "content": (f"Turn {i}: " + "we traced the failing nightly export to a timeout in the upload client. " * 8)[:400]}
+                 for i in range(4)]
+        return {"request": req[:2500], "workspace_files": [f"src/pkg_{i % 6}/module_{i}.py" for i in range(60)], "recent_turns": turns}
+
     def bench(self) -> dict:
+        """Classifieur : trois series etiquetees (BENCH_SERIES). Le petit etat en cache est le meilleur cas ; chaque tour reel
+        lit un etat Prophet neuf (serie "cold"), puis le relit en cache pour ses autres questions (serie "warm")."""
+        from jev_clone.prophet import PROPHET_TURN
         s1, s2 = self.agent.engines()
         req = {"state": "Customer: my payouts failed three times this week and nobody answered my emails.",
                "questions": {"team": {"type": "choice", "instructions": "Which team should handle this?", "criteria": ["payments", "account", "other"]},
@@ -207,11 +226,25 @@ class Studio:
         lat = []
         for _ in range(10):
             t0 = time.perf_counter(); s1.answer(req); lat.append((time.perf_counter() - t0) * 1000)
-        lat.sort()
+        cold, warm, cold_tok, warm_tok = [], [], [], []
+        for _ in range(3):   # un appel a froid prend plusieurs secondes sur CPU : peu d'iterations
+            q = {"state": self._bench_state(), "questions": PROPHET_TURN}
+            for ms, tok in ((cold, cold_tok), (warm, warm_tok)):
+                t0 = time.perf_counter(); r = s1.answer(q); ms.append((time.perf_counter() - t0) * 1000)
+                tok.append(int(getattr(getattr(r, "usage", None), "question_tokens", 0) or 0))
+
+        def p50(xs: list[float]) -> float:
+            return round(sorted(xs)[len(xs) // 2], 1)
+
+        def p95(xs: list[float]) -> float:
+            return round(sorted(xs)[min(len(xs) - 1, -(-len(xs) * 95 // 100) - 1)], 1)
         t0 = time.perf_counter()
         r = s2.chat([{"role": "user", "content": "Ecris un paragraphe de 120 mots sur l'art du bonsai."}], max_tokens=160, thinking_budget=0, temperature=0.7)
         tm = r.get("timings") or {}
-        out = {"ts": time.time(), "s1_p50_ms": round(lat[len(lat) // 2], 1), "s1_p95_ms": round(lat[-1], 1),
+        out = {"ts": time.time(), "s1_p50_ms": p50(lat), "s1_p95_ms": p95(lat),
+               "s1_cold_p50_ms": p50(cold), "s1_cold_p95_ms": p95(cold), "s1_cold_prefill_tokens": sorted(cold_tok)[len(cold_tok) // 2],
+               "s1_warm_p50_ms": p50(warm), "s1_warm_p95_ms": p95(warm), "s1_warm_prefill_tokens": sorted(warm_tok)[len(warm_tok) // 2],
+               "s1_series": dict(self.BENCH_SERIES), "s1_mono": self.runtime.mono,
                "s2_tok_s": round(float(tm.get("predicted_per_second") or 0), 1), "s2_prefill_tok_s": round(float(tm.get("prompt_per_second") or 0), 1),
                "s2_total_s": round(time.perf_counter() - t0, 2), "plan": self.runtime.plan.title if self.runtime.plan else None,
                "gpu": self.hw.gpu.name if self.hw.gpu else "CPU", "demo": self.demo}
@@ -219,6 +252,14 @@ class Studio:
         with open(self.paths.runs / "bench.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(out, ensure_ascii=False) + "\n")
         return out
+
+
+def release_core_info(paths: Paths) -> None:
+    """Retire core.json seulement s'il decrit ce processus : une autre instance (lancee avec --parent-pid) a pu le reecrire.
+    Un seul controle pour tous les chemins de sortie : lifespan, atexit, disparition du processus parent."""
+    with contextlib.suppress(Exception):
+        if json.loads(paths.core_info.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            paths.core_info.unlink()
 
 
 def build_app(studio: Studio) -> FastAPI:
@@ -239,9 +280,7 @@ def build_app(studio: Studio) -> FastAPI:
             studio.runtime.stop()
             # core.json : retire ici, car sur SIGTERM uvicorn re-emet le signal apres l'arret et atexit ne tourne pas ;
             # seulement s'il decrit ce processus (une autre instance a pu le reecrire)
-            with contextlib.suppress(Exception):
-                if json.loads(studio.paths.core_info.read_text(encoding="utf-8")).get("pid") == os.getpid():
-                    studio.paths.core_info.unlink()
+            release_core_info(studio.paths)
 
     app = FastAPI(title="Prophet Studio", version=__version__, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     origins = {f"http://127.0.0.1:{studio.port}", f"http://localhost:{studio.port}", "tauri://localhost", "http://tauri.localhost",

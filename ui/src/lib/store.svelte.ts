@@ -124,11 +124,28 @@ class AppState {
         if (this.session) this.openSession(this.session.id, true);
         return;
       }
-      case "runtime.status":
-        if (this.core) this.core.runtime = e.runtime;
-        if (e.runtime.state === "ready") this.toast("ok", "Modeles prets", e.runtime.plan?.title);
-        if (e.runtime.state === "error") this.toast("error", "Demarrage impossible", e.runtime.message);
+      case "runtime.status": {
+        // toasts sur les transitions : une relance automatique n'est jamais un "Demarrage impossible", le retour apres
+        // relance et le passage en mode mono sont annonces
+        type Rt = import("./types").Runtime & { restarting?: "s1" | "s2" | null };
+        const was = this.core?.runtime as Rt | undefined;
+        const prev = { state: was?.state, mono: was?.mono, restarting: was?.restarting };
+        const r: Rt = e.runtime;
+        if (this.core) this.core.runtime = r;
+        const up = (s?: string) => s === "ready" || s === "degraded";
+        const who = (k?: string | null) => (k === "s1" ? "du classifieur" : "de Bonsai");
+        if (r.restarting) {
+          if (r.restarting !== prev.restarting) this.toast("warn", `Redemarrage automatique ${who(r.restarting)}`, r.message, 7000);
+        } else if (r.state === "error") {
+          const title = prev.restarting ? `Redemarrage ${who(prev.restarting)} impossible` : up(prev.state) ? "Bonsai s'est arrete" : "Demarrage impossible";
+          this.toast("error", title, r.message, 8000);
+        } else if (up(r.state) && (prev.restarting || !up(prev.state) || prev.mono !== r.mono)) {
+          if (prev.restarting && !(prev.restarting === "s1" && r.mono)) this.toast("ok", `Relance ${who(prev.restarting)} reussie`, r.message, 6000);
+          else if (r.mono) this.toast("warn", "Mode mono : Bonsai repond aussi pour le classifieur", r.message, 7000);
+          else this.toast("ok", "Modeles prets", r.message || r.plan?.title);
+        }
         return;
+      }
       case "runtime.server":
         if (this.core) this.core.runtime.servers[e.server.name as "s1" | "s2"] = e.server;
         return;
