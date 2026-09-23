@@ -19,26 +19,64 @@ from jev_clone.prompt import Branch, render_text
 from jev_clone.schema import ChoiceAnswer, NoulAnswer, ScoreAnswer, ScoreQuestion
 
 
+KINDS = ("noul", "choice", "score")
+
+
 @dataclass
 class Calibration:
     temperature: dict[str, float] = field(default_factory=lambda: {"noul": 1.0, "choice": 1.0, "score": 1.0})
-    thresholds: dict[str, float] = field(default_factory=dict)   # seuil de confiance par question (optionnel)
+    # seuil de la porte par question, sur la statistique de fusion.gate_statistic (probabilite de l'option retenue,
+    # apres temperature) ; None = aucun seuil n'atteint la precision visee : toujours escalader
+    thresholds: dict[str, float | None] = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)      # modele, nombre d'exemples, ECE avant / apres, source...
 
     def t(self, kind: str) -> float:
         return float(self.temperature.get(kind, 1.0))
+
+    def threshold(self, name: str, default: float) -> float:
+        """Seuil calibre d'une question (`default` si elle n'a pas ete calibree) ; inf = ne jamais agir seul."""
+        if name not in self.thresholds:
+            return float(default)
+        v = self.thresholds[name]
+        return math.inf if v is None else float(v)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Calibration":
+        """Valide un contenu de calibration.json (fichier importe, par ex.) : ValueError s'il n'en est pas un."""
+        if not isinstance(d, dict) or not isinstance(d.get("temperature"), dict):
+            raise ValueError("pas une calibration : objet {temperature: {noul, choice, score}, thresholds: {...}} attendu")
+        temp = {}
+        for k, v in d["temperature"].items():
+            if k not in KINDS:
+                raise ValueError(f"temperature : primitive inconnue '{k}' (attendu : {', '.join(KINDS)})")
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0.01 <= float(v) <= 100.0):
+                raise ValueError(f"temperature {k} invalide : {v!r} (nombre entre 0,01 et 100 attendu)")
+            temp[k] = float(v)
+        thr = d.get("thresholds") or {}
+        if not isinstance(thr, dict):
+            raise ValueError("thresholds : objet {question: seuil} attendu")
+        for k, v in thr.items():
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0)):
+                raise ValueError(f"seuil de '{k}' invalide : {v!r} (nombre entre 0 et 1, ou null = toujours escalader)")
+        meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
+        return cls(temperature=temp, thresholds={str(k): (None if v is None else float(v)) for k, v in thr.items()}, meta=dict(meta))
+
+    def to_dict(self) -> dict:
+        return {"temperature": self.temperature, "thresholds": self.thresholds, **({"meta": self.meta} if self.meta else {})}
 
     @classmethod
     def load(cls, path: str | Path | None) -> "Calibration":
         if path is None or not Path(path).exists():
             return cls()
-        with open(path) as f:
-            d = json.load(f)
-        return cls(temperature=d.get("temperature", {}), thresholds=d.get("thresholds", {}))
+        with open(path, encoding="utf-8") as f:
+            return cls.from_dict(json.load(f))
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump({"temperature": self.temperature, "thresholds": self.thresholds}, f, indent=2)
+        tmp = Path(path).with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        tmp.replace(path)
 
 
 def softmax(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:

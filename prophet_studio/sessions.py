@@ -124,10 +124,10 @@ class PendingPermission:
 
 class AgentService:
     def __init__(self, store: SessionStore, publish: Callable[[dict], None], urls: Callable[[], tuple[str, str]],
-                 settings: Callable, ctx: Callable[[], int], calibration: str | None = None, runs_dir: Path | None = None,
-                 desktop_backend: Callable | None = None):
+                 settings: Callable, ctx: Callable[[], int], calibration: str | Callable[[], str | Path | None] | None = None,
+                 runs_dir: Path | None = None, desktop_backend: Callable | None = None):
         self.store, self.publish, self.urls, self.settings, self.ctx = store, publish, urls, settings, ctx
-        self.calibration = calibration
+        self.calibration = calibration   # chemin, ou rappel -> fichier du classifieur en marche (None en mode mono)
         self.running: dict[str, dict] = {}           # session_id -> {"turn_id", "cancel": Event, "thread"}
         self.permissions: dict[str, PendingPermission] = {}
         self._engines: tuple | None = None
@@ -135,13 +135,30 @@ class AgentService:
         self.runs_dir = runs_dir
         self.desktop_backend = desktop_backend   # None = Windows UI Automation ; la demo passe un bureau simule
 
+    def calibration_path(self) -> str | None:
+        """Calibration a appliquer : celle du classifieur en marche, s'il en a une (jamais celle d'un autre modele)."""
+        c = self.calibration() if callable(self.calibration) else self.calibration
+        return str(c) if c and Path(c).is_file() else None
+
+    def invalidate_engines(self) -> None:
+        self._engines = None
+
     def engines(self) -> tuple[SystemOneEngine, LlamaCppBackend]:
         s1_url, s2_url = self.urls()
-        if self._engines is None or self._engines[2] != (s1_url, s2_url):
-            s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=120), calibration=Calibration.load(self.calibration),
-                                 model_name="systemone")
+        cal = self.calibration_path()
+        try:
+            stamp = Path(cal).stat().st_mtime_ns if cal else None
+        except OSError:
+            stamp = None
+        key = (s1_url, s2_url, cal, stamp)       # autre classifieur, calibration ajoutee / remplacee : moteur reconstruit
+        if self._engines is None or self._engines[2] != key:
+            try:
+                calibration = Calibration.load(cal)
+            except Exception:                    # fichier illisible (signale dans l'etat) : lecture brute plutot qu'une panne
+                calibration = Calibration()
+            s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=120), calibration=calibration, model_name="systemone")
             s2 = LlamaCppBackend(s2_url, max_workers=1, timeout=900)
-            self._engines = (s1, s2, (s1_url, s2_url))
+            self._engines = (s1, s2, key)
         return self._engines[0], self._engines[1]
 
     # ---- tours -----------------------------------------------------------------------------------------------------

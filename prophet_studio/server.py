@@ -53,9 +53,10 @@ class Studio:
         self.runtime = Runtime(paths.logs, self.bus.publish, self.installer.model_path, self.installer.mmproj_path,
                                self.server_cmd, self.installer.installed_models)
         self.sessions = SessionStore(paths.sessions)
+        from prophet_studio.calibration import active_s1_model, calibration_file   # un fichier par classifieur, aucun en mono
         self.agent = AgentService(self.sessions, self.bus.publish, urls=lambda: (self.runtime.s1_url, self.runtime.s2.url),
                                   settings=self.settings.get, ctx=lambda: self.runtime.plan.s2.ctx if self.runtime.plan else 8192,
-                                  calibration=str(paths.runs / "calibration.json") if (paths.runs / "calibration.json").exists() else None,
+                                  calibration=lambda: calibration_file(paths.runs, active_s1_model(self.runtime)),
                                   desktop_backend=self._demo_desktop if demo else None)
         self.voice = VoiceService(self.installer.voice_files, self.settings.get, threads=max(1, min(4, self.hw.cpu_cores // 2)))
         self.monitor = hwmod.GpuMonitor()
@@ -82,7 +83,7 @@ class Studio:
         ids = ["bonsai2-27b-ptq1", "ternary-1.7b"]
         try:
             p = self.plan()
-            ids += [sp.model_id for sp in (p.s2, p.s1) if sp is not None and sp.model_id not in ids]
+            ids += [sp.model_id for sp in (p.s2, p.s1) if sp is not None and sp.model_id not in ids and sp.model_id in MODELS]
         except Exception:
             pass
         for mid in ids:
@@ -344,6 +345,53 @@ def build_app(studio: Studio) -> FastAPI:
             return {"id": studio.installer.import_gguf(b["path"], b.get("role", "s1"), b.get("label", ""))}
         except Exception as e:
             raise HTTPException(400, str(e)[:300])
+
+    # ---- calibration du classifieur (System One) : un fichier par modele, applique au seul S1 en marche ----------------------
+    def _calibration_changed() -> None:
+        studio.agent.invalidate_engines()
+        studio.bus.publish({"type": "install.changed", "installed": studio.installer.status()})
+
+    @app.post("/api/calibrate")
+    async def calibrate_s1(request: Request):
+        """Lit les graines etiquetees livrees avec le S1 en marche (T = 1), ajuste temperature + seuils, ecrit son fichier."""
+        from prophet_studio import calibration as s1cal
+        b = await request.json() if int(request.headers.get("content-length") or 0) else {}
+        b = b if isinstance(b, dict) else {}
+        mid = s1cal.active_s1_model(studio.runtime)
+        if studio.runtime.state not in ("ready", "degraded") or mid is None:
+            raise HTTPException(409, "aucun classifieur (System One) en marche a calibrer : modeles arretes ou mode mono")
+        target = float(b.get("target_precision") or 0.95)
+        if not 0.5 <= target < 1.0:
+            raise HTTPException(422, "target_precision doit etre entre 0,5 et 1")
+        try:
+            cal = await asyncio.to_thread(s1cal.run, studio.runtime.s1_url, mid, studio.bus.publish, target)
+        except s1cal.Busy as e:
+            raise HTTPException(409, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"calibration impossible : {type(e).__name__}: {str(e)[:300]}")
+        if s1cal.active_s1_model(studio.runtime) != mid:
+            raise HTTPException(409, "le classifieur a change pendant la calibration : relancez-la")
+        out = s1cal.store(studio.paths.runs, mid, cal)
+        studio.bus.publish({"type": "s1.calibration", "status": "done", "model": mid, "done": out["n"], "total": out["n"]})
+        _calibration_changed()
+        return out
+
+    @app.post("/api/calibration/import")
+    async def import_calibration(request: Request):
+        """calibration.json (notebook, autre machine) -> fichier du modele choisi (par defaut le classifieur en marche)."""
+        from prophet_studio import calibration as s1cal
+        b = await request.json()
+        if not isinstance(b, dict):
+            raise HTTPException(422, "objet {path | data, model_id} attendu")
+        mid = b.get("model_id") or s1cal.active_s1_model(studio.runtime)
+        if not isinstance(mid, str) or (mid not in MODELS and mid not in studio.installer.registry["models"]):
+            raise HTTPException(404, f"modele inconnu : {mid}")
+        try:
+            out = s1cal.import_calibration(studio.paths.runs, mid, b.get("data"), b.get("path"), bool(b.get("force")))
+        except Exception as e:
+            raise HTTPException(400, str(e)[:300])
+        _calibration_changed()
+        return out
 
     # ---- runtime ------------------------------------------------------------------------------------------------------------
     @app.post("/api/runtime/start")

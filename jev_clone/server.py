@@ -60,7 +60,7 @@ def build_app(s1_engine: SystemOneEngine | None = None, router: FusionRouter | N
         r = fusion().decide(req)
         return {"path": r.path, "decisions": r.decisions, "gated": r.gated,
                 "s1": r.s1.model_dump(), "s2_text": r.s2_text, "s2_reasoning": r.s2_reasoning,
-                "verification": r.verification, "latency_ms": r.latency_ms}
+                "verification": r.verification, "latency_ms": r.latency_ms, "sources": r.sources, "unresolved": r.unresolved, "s2_error": r.s2_error}
 
     return app
 

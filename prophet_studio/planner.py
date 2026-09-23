@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 
-from prophet_studio.catalog import MODELS, ModelSpec, kv_mib
+from prophet_studio.catalog import MODELS, ModelSpec, get_model, kv_mib
 from prophet_studio.hardware import GPU, HardwareInfo
 
 CTX_STEPS = [131072, 98304, 65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096]
@@ -95,9 +95,24 @@ def expected_speed(g: GPU | None, m: ModelSpec, device: str) -> dict:
             "basis": f"{g.bandwidth_gbs} Go/s / {gb:.2f} Go x efficacite {lo:.2f}-{hi:.2f}"}
 
 
+def _override(model_id: str) -> ModelSpec | None:
+    """Modele impose dans les reglages : catalogue ou GGUF importe (clone entraine) ; None = choix automatique."""
+    return get_model(model_id) if model_id and model_id != "auto" else None
+
+
+def _model_notes(s2_override: str, s1_override: str, s2m: ModelSpec, s1m: ModelSpec | None) -> list[str]:
+    """Un choix impose qui n'est pas applique (fichier deplace, id inconnu) ne doit jamais passer en silence."""
+    notes = [f"{what} impose '{o}' introuvable (GGUF deplace ou supprime ?) : choix automatique a la place."
+             for what, o in (("Cerveau", s2_override), ("Classifieur", s1_override)) if o and o != "auto" and get_model(o) is None]
+    notes += [f"{m.label} : GGUF importe, memoire estimee depuis la taille du fichier ({m.weights_gib:.2f} Gio, KV et surcout majores)."
+              for m in (s2m, s1m) if m is not None and m.custom]
+    return notes
+
+
 def _pick_s1(total_mib: float, override: str) -> ModelSpec:
-    if override and override != "auto" and override in MODELS:
-        return MODELS[override]
+    m = _override(override)
+    if m is not None:
+        return m
     if total_mib >= 20000:
         return MODELS["ternary-8b"]
     if total_mib >= 11500:
@@ -106,8 +121,9 @@ def _pick_s1(total_mib: float, override: str) -> ModelSpec:
 
 
 def _s2_candidates(avail_mib: float, priority: str, override: str) -> list[ModelSpec]:
-    if override and override != "auto" and override in MODELS:
-        return [MODELS[override]]
+    m = _override(override)
+    if m is not None:
+        return [m]
     if priority == "vitesse":
         order = ["bonsai-27b-q1", "bonsai-8b-q1"]
     elif avail_mib >= 10500:
@@ -123,17 +139,15 @@ def _kv_type(total_mib: float) -> str:
 
 def cpu_plan(hw: HardwareInfo, priority: str, s2_override: str = "auto", s1_override: str = "auto") -> Plan:
     ram = hw.ram_total_gib
-    if s2_override != "auto" and s2_override in MODELS:
-        s2m = MODELS[s2_override]
-    elif priority != "vitesse" and ram >= 24:
-        s2m = MODELS["bonsai-27b-q1"]
-    else:
-        s2m = MODELS["bonsai-8b-q1"]
-    s1m = MODELS[s1_override] if s1_override in MODELS else MODELS["ternary-1.7b"]
+    s2m = _override(s2_override)
+    if s2m is None:
+        s2m = MODELS["bonsai-27b-q1"] if priority != "vitesse" and ram >= 24 else MODELS["bonsai-8b-q1"]
+    s1m = _override(s1_override) or MODELS["ternary-1.7b"]
     threads = max(1, min(hw.cpu_cores, 8))
     ctx = 8192 if ram >= 12 else 4096
     notes = [f"Pas de GPU NVIDIA exploitable : tout tourne sur le CPU ({hw.cpu_cores} coeurs, {ram:.0f} Gio de RAM).",
-             "Les deux modeles vivent en RAM ; comptez ~15-20 tok/s pour le 8B 1-bit sur 8 coeurs AVX2."]
+             "Les deux modeles vivent en RAM ; comptez ~15-20 tok/s pour le 8B 1-bit sur 8 coeurs AVX2.",
+             *_model_notes(s2_override, s1_override, s2m, s1m)]
     if s2m.id != "bonsai-8b-q1":
         notes.append("27B sur CPU : puissant mais lent (~3-6 tok/s) ; la priorite 'vitesse' repasse au 8B.")
     need = (s2m.weights_gib + s2m.overhead_gib + s1m.weights_gib + s1m.overhead_gib) * 1024 + kv_mib(s2m, ctx) + kv_mib(s1m, S1_CTX, S1_KV)
@@ -185,6 +199,7 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         per_layer = _gib(m.weights_gib) / S2_LAYERS
         room = avail - _gib(m.overhead_gib) - kv_mib(m, 4096, kv)
         ngl = max(0, min(99, int(room / per_layer)))
+        notes += _model_notes(s2_override, s1_override, m, s1m)
         notes.append(f"VRAM insuffisante pour {m.label} entier : {ngl} couches sur GPU, le reste sur CPU (plus lent).")
         s2 = ServerPlan("s2", m.id, "partial" if ngl > 0 else "cpu", ngl, 4096, 1, kv, "off", 1024, threads=hw.cpu_cores)
         s1 = ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS, S1_KV, threads=hw.cpu_cores)
@@ -203,7 +218,8 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
     used = sum(parts.values())
     budget = {"total": total, "other": other, **{k: round(v) for k, v in parts.items()}, "reserve": SAFETY_MIB,
               "free": round(max(0.0, total - other - SAFETY_MIB - used))}
-    if m.id.startswith("bonsai2"):
+    notes += _model_notes(s2_override, s1_override, m, s1m)
+    if m.id.startswith("bonsai2") or m.custom:
         notes.append(f"{m.label} entierement sur GPU, cache KV {kv} ({ctx // 1024} k tokens de contexte).")
     else:
         notes.append(f"{m.label} : Bonsai 2 ne tient pas avec ce budget ({avail:.0f} Mio) ou la priorite 'vitesse' est choisie.")
@@ -245,5 +261,5 @@ def degrade(plan: Plan, installed: set[str] | None = None) -> Plan | None:
         return None
     p.s2, p.s1 = s2, s1
     p.notes.append(f"Memoire insuffisante au lancement -> {step}.")
-    p.title = f"{plan.title.split(' · ')[0]} · {MODELS[s2.model_id].label} · {s2.ctx // 1024}k (ajuste)"
+    p.title = f"{plan.title.split(' · ')[0]} · {getattr(get_model(s2.model_id), 'label', s2.model_id)} · {s2.ctx // 1024}k (ajuste)"
     return p

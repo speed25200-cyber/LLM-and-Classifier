@@ -1,12 +1,19 @@
 """Calibration post-hoc et metriques (ECE, Brier, NLL, precision selective) a partir d'un JSONL
-d'exemples etiquetes : {"state": ..., "questions": {...}, "labels": {qid: reponse}}.
+d'exemples etiquetes : {"state": ..., "labels": {qid: reponse}, "questions": {...} (facultatif)}.
+Sans "questions", c'est le schema pre-tour de Prophet (jev_clone.prophet.PROPHET_TURN), restreint aux questions
+etiquetees : le format des graines livrees (jev_clone/seeds/prophet_seeds.jsonl, copie de training/seeds/).
 
+    # classifieur de Prophet Studio : fichier par modele, applique par Studio a ce S1 seulement (ou bouton "Calibrer")
+    python -m jev_clone.calibrate --server http://127.0.0.1:7881 --studio-model ternary-1.7b
+    # jeu de donnees quelconque -> fichier libre (jev serve : JEV_CALIBRATION)
     python -m jev_clone.calibrate --server http://127.0.0.1:8081 --data data/val.jsonl --out runs/calibration.json
 
 RLCD-lite : Jev est entraine par "Reinforcement Learning for Calibrated Decisions" avec une regle de
 score propre (log / Brier). Quand la sortie du modele EST la distribution, l'esperance de la recompense
 est differentiable : l'objectif RL se reduit a minimiser NLL ou Brier (voir training/). Ici on n'ajuste
 qu'une temperature par primitive, ce qui suffit souvent a rendre les pourcentages "honnetes".
+Les seuils par question sont calcules APRES la temperature, sur la statistique de la porte (fusion.gate_statistic :
+probabilite de l'option retenue) ; une question qu'aucun seuil ne rend assez precise recoit `null` : toujours escalader.
 """
 
 from __future__ import annotations
@@ -14,11 +21,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
-from jev_clone.readout import softmax
+from jev_clone.fusion import gate_statistic
+from jev_clone.readout import Calibration, probs_to_logits, softmax
+
+SEEDS = Path(__file__).parent / "seeds" / "prophet_seeds.jsonl"   # graines etiquetees de Prophet, livrees avec le paquet
 
 
 @dataclass
@@ -39,6 +51,9 @@ class Report:
             if b["n"]:
                 s += f"  {b['lo']:.2f}-{b['hi']:.2f} {b['n']:5d}  {b['conf']:.3f}  {b['acc']:.3f}\n"
         return s
+
+    def summary(self) -> dict:
+        return {"n": self.n, **{k: round(getattr(self, k), 4) for k in ("accuracy", "nll", "brier", "ece", "mean_confidence")}}
 
 
 def report(probs: np.ndarray, labels: np.ndarray, n_bins: int = 15) -> Report:
@@ -103,28 +118,62 @@ def _index_of(kind: str, q, label) -> int:
     return int(label)
 
 
-def collect(engine, examples: list[dict]):
-    """Lit chaque exemple avec l'engine (temperature 1) et renvoie (logits par kind, labels par kind, conf/correct par qid)."""
-    from jev_clone.readout import probs_to_logits
+def load_examples(path: str | Path | None = None) -> list[dict]:
+    """JSONL d'exemples etiquetes ; par defaut les graines de Prophet livrees avec le paquet."""
+    with open(path or SEEDS, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def questions_for(ex: dict) -> dict:
+    """Questions d'un exemple : les siennes, sinon celles du schema pre-tour de Prophet qui sont etiquetees."""
+    if ex.get("questions"):
+        return ex["questions"]
+    from jev_clone.prophet import PROPHET_TURN
+    qs = {k: PROPHET_TURN[k] for k in ex.get("labels", {}) if k in PROPHET_TURN}
+    if not qs:
+        raise ValueError("exemple sans 'questions' ni etiquette du schema pre-tour de Prophet "
+                         f"({', '.join(PROPHET_TURN)})")
+    return qs
+
+
+def _probs(q, a) -> np.ndarray:
+    """Distribution d'une reponse dans l'ordre des options declarees (celui des index d'etiquettes)."""
+    if q.type == "noul":
+        return np.array([a.noul, 1.0 - a.noul])
+    if q.type == "choice":
+        return np.array([a.probabilities[str(k)] for k in q.options()])
+    return np.array([a.probabilities[str(i)] for i in range(len(q.criteria))])
+
+
+def collect(engine, examples: list[dict], on_progress=None):
+    """Lit chaque exemple avec l'engine (sans calibration : temperature 1).
+    Renvoie per_kind {kind: (logits, index justes)} et per_qid {qid: (kind, logits, index justes)}."""
     from jev_clone.schema import SystemOneRequest
 
+    cal = getattr(engine, "cal", None)
+    if cal is not None and any(abs(cal.t(k) - 1.0) > 1e-9 for k in ("noul", "choice", "score")):
+        raise ValueError("la calibration se mesure sur des lectures brutes : engine sans calibration (T = 1) attendu")
     per_kind: dict[str, tuple[list, list]] = {"noul": ([], []), "choice": ([], []), "score": ([], [])}
-    per_qid: dict[str, tuple[list, list]] = {}
-    for ex in examples:
-        req = SystemOneRequest(state=ex["state"], questions=ex["questions"])
+    per_qid: dict[str, tuple[str, list, list]] = {}
+    for i, ex in enumerate(examples):
+        req = SystemOneRequest(state=ex["state"], questions=questions_for(ex))
         resp = engine.answer(req)
         for qid, q in req.questions.items():
             if qid not in ex.get("labels", {}):
                 continue
-            a = resp.answers[qid]
-            if q.type == "noul":
-                p = np.array([a.noul, 1 - a.noul])
-            else:
-                p = np.array(list(a.probabilities.values()))
-            gold = _index_of(q.type, q, ex["labels"][qid])
-            per_kind[q.type][0].append(probs_to_logits(p)); per_kind[q.type][1].append(gold)
-            per_qid.setdefault(qid, ([], []))
-            per_qid[qid][0].append(float(p.max())); per_qid[qid][1].append(float(p.argmax() == gold))
+            p = _probs(q, resp.answers[qid])
+            try:
+                gold = _index_of(q.type, q, ex["labels"][qid])
+            except (ValueError, TypeError):
+                continue                      # etiquette hors des options : ignoree
+            if not 0 <= gold < len(p):
+                continue
+            lg = probs_to_logits(p)
+            per_kind[q.type][0].append(lg); per_kind[q.type][1].append(gold)
+            e = per_qid.setdefault(qid, (q.type, [], []))
+            e[1].append(lg); e[2].append(gold)
+        if on_progress is not None:
+            on_progress(i + 1, len(examples))
     return per_kind, per_qid
 
 
@@ -136,38 +185,67 @@ def pad(rows: list[np.ndarray]) -> np.ndarray:
     return out
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Calibration du clone Jev (temperature + seuils)")
-    ap.add_argument("--server", default="http://127.0.0.1:8081")
-    ap.add_argument("--data", required=True, help="JSONL {state, questions, labels}")
-    ap.add_argument("--out", default="runs/calibration.json")
-    ap.add_argument("--target-precision", type=float, default=0.95)
-    args = ap.parse_args(argv)
-
-    from jev_clone.backend_llamacpp import LlamaCppBackend
-    from jev_clone.engine import SystemOneEngine
-    from jev_clone.readout import Calibration
-
-    engine = SystemOneEngine(LlamaCppBackend(args.server))
-    with open(args.data) as f:
-        examples = [json.loads(l) for l in f if l.strip()]
-    per_kind, per_qid = collect(engine, examples)
-
-    cal = Calibration()
+def fit(per_kind: dict, per_qid: dict, target_precision: float = 0.95) -> tuple[Calibration, dict]:
+    """Temperature par primitive (NLL), puis seuil par question sur gate_statistic des probabilites APRES temperature."""
+    cal, reports = Calibration(), {}
     for kind, (rows, labels) in per_kind.items():
         if not rows:
             continue
         L, y = pad(rows), np.array(labels)
-        print(f"== {kind} : avant ==\n{report(np.stack([softmax(l) for l in L]), y)}")
-        T = fit_temperature(L, y)
+        before = report(np.stack([softmax(l) for l in L]), y)
+        T = round(fit_temperature(L, y), 4)
         cal.temperature[kind] = T
-        print(f"== {kind} : apres T={T:.3f} ==\n{report(np.stack([softmax(l, T) for l in L]), y)}")
-    for qid, (conf, ok) in per_qid.items():
-        thr = threshold_for_precision(np.array(conf), np.array(ok), args.target_precision)
-        if thr is not None:
-            cal.thresholds[qid] = round(thr, 4)
-    cal.save(args.out)
-    print(f"calibration ecrite dans {args.out}: {cal}")
+        reports[kind] = {"before": before, "after": report(np.stack([softmax(l, T) for l in L]), y)}
+    for qid, (kind, rows, labels) in per_qid.items():
+        P = [softmax(l, cal.t(kind)) for l in rows]
+        conf = np.array([gate_statistic(p) for p in P])
+        ok = np.array([float(p.argmax() == g) for p, g in zip(P, labels)])
+        thr = threshold_for_precision(conf, ok, target_precision)
+        cal.thresholds[qid] = None if thr is None else math.floor(thr * 1e4) / 1e4   # arrondi vers le bas : meme ensemble retenu
+    return cal, reports
+
+
+def calibrate(engine, examples: list[dict], target_precision: float = 0.95, on_progress=None, **meta) -> tuple[Calibration, dict]:
+    """Collecte + ajustement ; `meta` (modele, source...) est enregistre avec le resultat."""
+    per_kind, per_qid = collect(engine, examples, on_progress)
+    if not any(rows for rows, _ in per_kind.values()):
+        raise ValueError("aucun exemple etiquete exploitable")
+    cal, reports = fit(per_kind, per_qid, target_precision)
+    cal.meta = {**{k: v for k, v in meta.items() if v is not None}, "n": len(examples), "ts": round(time.time(), 1),
+                "target_precision": target_precision, "statistic": "top1",
+                "report": {k: {w: r.summary() for w, r in v.items()} for k, v in reports.items()}}
+    return cal, reports
+
+
+def main(argv=None, engine=None):
+    ap = argparse.ArgumentParser(description="Calibration du clone Jev (temperature + seuils)")
+    ap.add_argument("--server", default="http://127.0.0.1:8081")
+    ap.add_argument("--data", default=None, help="JSONL {state, labels, questions?} (defaut : graines de Prophet livrees)")
+    ap.add_argument("--out", default=None, help="defaut : runs/calibration.json, ou le fichier de Studio avec --studio-model")
+    ap.add_argument("--studio-model", default=None, help="id du classifieur dans Prophet Studio : ecrit <donnees>/runs/calibration/<id>.json")
+    ap.add_argument("--target-precision", type=float, default=0.95)
+    args = ap.parse_args(argv)
+
+    out = args.out
+    if out is None and args.studio_model:
+        from prophet_studio.calibration import calibration_file
+        from prophet_studio.config import Paths
+        out = calibration_file(Paths().runs, args.studio_model)
+        if out is None:
+            ap.error(f"--studio-model : identifiant invalide {args.studio_model!r}")
+    out = out or "runs/calibration.json"
+    if engine is None:
+        from jev_clone.backend_llamacpp import LlamaCppBackend
+        from jev_clone.engine import SystemOneEngine
+        engine = SystemOneEngine(LlamaCppBackend(args.server, max_workers=4))
+    cal, reports = calibrate(engine, load_examples(args.data), args.target_precision, source="cli",
+                             model_id=args.studio_model, data=str(args.data or SEEDS))
+    for kind, r in reports.items():
+        print(f"== {kind} : avant ==\n{r['before']}")
+        print(f"== {kind} : apres T={cal.t(kind):.3f} ==\n{r['after']}")
+    cal.save(out)
+    print(f"calibration ecrite dans {out}: temperature={cal.temperature} seuils={cal.thresholds}")
+    return cal
 
 
 if __name__ == "__main__":

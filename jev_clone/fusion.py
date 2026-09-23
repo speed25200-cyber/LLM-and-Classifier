@@ -6,25 +6,37 @@
                                           -> option : S1 verifie la sortie de Bonsai (garde-fou)
     tout est journalise (ledger JSONL) pour re-calibrer / re-entrainer S1 (boucle de distillation).
 
+La porte et la calibration (calibrate.py) utilisent la MEME statistique : `gate_statistic`, la probabilite de
+l'option retenue apres temperature (max(p, 1-p) pour un noul). Le champ `confidence` des reponses (1 - entropie
+normalisee, contrat TypeSafe) reste renvoye mais ne sert pas a la porte.
+Les reponses de Bonsai sont typees question par question ; une reponse absente ou invalide, ou un Bonsai
+injoignable, laisse la valeur de S1 marquee `s1_fallback` (liste `unresolved`) : jamais en silence, jamais une 500.
+
 Le routeur ne contient aucune logique metier : "le code calcule, Jev juge, le LLM raisonne".
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
+
 from jev_clone.readout import Calibration
 from jev_clone.schema import SystemOneRequest, SystemOneResponse
+
+TRUE_WORDS = {"yes", "y", "true", "oui", "vrai", "1"}
+FALSE_WORDS = {"no", "n", "false", "non", "faux", "0"}
 
 
 @dataclass
 class GatePolicy:
-    default_threshold: float = 0.85          # confiance (choice/score) ou max(p, 1-p) (noul) minimale pour agir seul
-    thresholds: dict[str, float] = field(default_factory=dict)   # par question, ex. issus de calibrate.py
+    default_threshold: float = 0.85          # probabilite de l'option retenue (gate_statistic) minimale pour agir seul
+    thresholds: dict[str, float | None] = field(default_factory=dict)   # par question, issus de calibrate.py (None = toujours escalader)
     risk_question: str | None = None         # qid d'une question 'score' de risque (0 = benin) ; module le budget de reflexion
     budgets: tuple[int, ...] = (0, 512, 2048, 8192)   # budget de reflexion Bonsai par niveau de risque
     always_escalate_if: dict[str, Any] = field(default_factory=dict)  # ex. {"needs_reasoning": True}
@@ -35,13 +47,21 @@ class GatePolicy:
         return cls(thresholds=dict(cal.thresholds), **kw)
 
     def threshold(self, qid: str) -> float:
-        return float(self.thresholds.get(qid, self.default_threshold))
+        if qid not in self.thresholds:
+            return float(self.default_threshold)
+        v = self.thresholds[qid]
+        return math.inf if v is None else float(v)   # aucun seuil fiable a la calibration : toujours escalader
+
+
+def gate_statistic(probs) -> float:
+    """Statistique de la porte, identique a la calibration : probabilite de l'option retenue."""
+    return float(np.max(np.asarray(probs, dtype=np.float64)))
 
 
 def answer_confidence(a) -> float:
     if a.type == "noul":
-        return max(a.noul, 1.0 - a.noul)
-    return float(a.confidence)
+        return gate_statistic([a.noul, 1.0 - a.noul])
+    return gate_statistic(list(a.probabilities.values()))
 
 
 def answer_value(a):
@@ -52,9 +72,47 @@ def answer_value(a):
     return a.score
 
 
+def coerce_answer(q, v) -> tuple[bool, Any]:
+    """Reponse de Bonsai pour une question typee -> (valide, valeur du meme type que answer_value)."""
+    if q.type == "noul":
+        if isinstance(v, bool):
+            return True, v
+        if isinstance(v, (int, float)) and v in (0, 1):
+            return True, bool(v)
+        if isinstance(v, str):
+            w = v.strip().strip(".!").lower()
+            if w in TRUE_WORDS or w in FALSE_WORDS:
+                return True, w in TRUE_WORDS
+        return False, None
+    if q.type == "choice":
+        keys = [str(k) for k in (q.criteria.keys() if isinstance(q.criteria, dict) else q.criteria)]
+        if isinstance(v, str):
+            w = v.strip()
+            if w in keys:
+                return True, w
+            low = {k.lower(): k for k in keys}
+            if w.lower() in low:
+                return True, low[w.lower()]
+        return False, None
+    from jev_clone.prompt import render_text
+    n = len(q.criteria)
+    if isinstance(v, str):
+        w = v.strip()
+        texts = {render_text(c).strip().lower(): i for i, c in enumerate(q.criteria)}
+        if w.lower() in texts:
+            return True, float(texts[w.lower()])
+        try:
+            v = float(w)
+        except ValueError:
+            return False, None
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= n - 1:
+        return True, float(v)
+    return False, None
+
+
 @dataclass
 class FusionResult:
-    path: str                                  # "system_one" | "escalated"
+    path: str                                  # "system_one" | "escalated" | "fallback" (escalade impossible : Bonsai en echec)
     s1: SystemOneResponse
     decisions: dict[str, Any]                  # valeur retenue par question
     gated: dict[str, bool]                     # True si S1 a suffi pour cette question
@@ -63,6 +121,9 @@ class FusionResult:
     s2_reasoning: str | None = None
     verification: dict | None = None
     latency_ms: float = 0.0
+    sources: dict[str, str] = field(default_factory=dict)   # "s1" | "s2" | "s1_fallback" (S1 sous le seuil, pas de reponse valide de Bonsai)
+    unresolved: list[str] = field(default_factory=list)     # questions restees sur une valeur S1 sous le seuil
+    s2_error: str | None = None
 
 
 class FusionRouter:
@@ -78,15 +139,21 @@ class FusionRouter:
     @staticmethod
     def default_escalation_prompt(state, req: SystemOneRequest, s1: SystemOneResponse) -> list[dict]:
         from jev_clone.prompt import render_text
+
+        def expected(q) -> str:
+            if q.type == "noul":
+                return "answer true or false"
+            if q.type == "choice":
+                return f"answer one of {list(q.criteria.keys()) if isinstance(q.criteria, dict) else list(q.criteria)}"
+            return "answer the level number: " + ", ".join(f"{i} = {render_text(c)}" for i, c in enumerate(q.criteria))
         low = {qid: (answer_value(a), round(answer_confidence(a), 3)) for qid, a in s1.answers.items()}
         return [
             {"role": "system", "content": "You are the reasoning tier of a decision system. A fast decision model "
                                           "was not confident enough. Reason carefully about the state, then answer "
-                                          "each question and justify briefly. End with a JSON object of final answers."},
+                                          "each question and justify briefly. End with a JSON object of final answers, "
+                                          "one key per question id."},
             {"role": "user", "content": f"# State\n{render_text(state)}\n\n# Questions\n"
-                                        + "\n".join(f"- {qid}: {render_text(q.instructions)} (options: "
-                                                    f"{list(q.criteria.keys()) if q.type == 'choice' and isinstance(q.criteria, dict) else (q.criteria if q.type != 'noul' else ['yes', 'no'])})"
-                                                    for qid, q in req.questions.items())
+                                        + "\n".join(f"- {qid}: {render_text(q.instructions)} ({expected(q)})" for qid, q in req.questions.items())
                                         + f"\n\n# Fast-model tentative answers (value, confidence)\n{json.dumps(low)}"},
         ]
 
@@ -104,11 +171,11 @@ class FusionRouter:
             gated[qid] = ok
             decisions[qid] = answer_value(a)
 
-        res = FusionResult(path="system_one", s1=s1, decisions=decisions, gated=gated)
+        res = FusionResult(path="system_one", s1=s1, decisions=decisions, gated=gated,
+                           sources={qid: "s1" if ok else "s1_fallback" for qid, ok in gated.items()})
+        res.unresolved = [qid for qid, ok in gated.items() if not ok]
         if all(gated.values()) or self.s2 is None:
-            res.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-            self._log(req, res)
-            return res
+            return self._done(req, res, t0)
 
         # --- escalade vers Bonsai ------------------------------------------------------------
         risk_level = 0
@@ -118,20 +185,31 @@ class FusionRouter:
                 risk_level = int(round(ra.score))
         budget = self.policy.budgets[min(risk_level, len(self.policy.budgets) - 1)]
         messages = self.escalation_prompt(state_for_s2 if state_for_s2 is not None else req.state, req, s1)
-        s2 = self.s2.chat(messages, max_tokens=1024, thinking_budget=budget, temperature=0.2)
-        msg = s2["choices"][0]["message"]
+        try:
+            s2 = self.s2.chat(messages, max_tokens=1024, thinking_budget=budget, temperature=0.2)
+            msg = s2["choices"][0]["message"]
+        except Exception as e:   # Bonsai injoignable ou reponse illisible : on garde S1, marque comme repli
+            res.path, res.s2_error = "fallback", f"{type(e).__name__}: {str(e)[:300]}"
+            return self._done(req, res, t0)
         res.path, res.s2 = "escalated", s2
         res.s2_text = msg.get("content")
         res.s2_reasoning = msg.get("reasoning_content")
         final = _extract_json(res.s2_text or "")
         for qid, ok in gated.items():
-            if not ok and qid in final:
-                decisions[qid] = final[qid]
+            if ok or qid not in final:
+                continue
+            valid, v = coerce_answer(req.questions[qid], final[qid])
+            if valid:
+                decisions[qid], res.sources[qid] = v, "s2"
+        res.unresolved = [qid for qid, src in res.sources.items() if src == "s1_fallback"]
         if self.policy.verify_with_s1 and res.s2_text:
             vq = {"consistent": {"type": "noul",
                                  "instructions": "Is the ANSWER below consistent with the STATE and does it follow the instructions?"}}
             vreq = SystemOneRequest(state={"STATE": req.state, "ANSWER": res.s2_text}, questions=vq)
             res.verification = self.s1.answer(vreq).answers["consistent"].model_dump()
+        return self._done(req, res, t0)
+
+    def _done(self, req: SystemOneRequest, res: FusionResult, t0: float) -> FusionResult:
         res.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
         self._log(req, res)
         return res
@@ -143,8 +221,8 @@ class FusionRouter:
         rec = {"ts": time.time(), "path": res.path, "state": req.state,
                "questions": {k: v.model_dump() for k, v in req.questions.items()},
                "s1": {k: v.model_dump() for k, v in res.s1.answers.items()},
-               "gated": res.gated, "decisions": res.decisions, "s2_text": res.s2_text,
-               "verification": res.verification, "latency_ms": res.latency_ms}
+               "gated": res.gated, "decisions": res.decisions, "sources": res.sources, "unresolved": res.unresolved,
+               "s2_text": res.s2_text, "s2_error": res.s2_error, "verification": res.verification, "latency_ms": res.latency_ms}
         with open(self.ledger, "a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
