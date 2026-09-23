@@ -4,6 +4,11 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 [02 Bonsai 2 27B](02-BONSAI-2-27B-analyse.md), [03 Materiel](03-MATERIEL-profils.md),
 [04 References](04-REFERENCES.md), [entrainement](../training/README.md). Code : `jev_clone/`, `scripts/`.
 
+Document de conception initial : ses chiffres (latences, debits) sont des objectifs et des estimations, et son "etat du
+depot" date de sa redaction. Etat actuel et comportements exacts : [docs/12](12-PROPHET-STUDIO.md) (sections 5 et 10) ;
+rien n'a tourne sur les vrais modeles ni sur un vrai GPU ; `conformal.py` et `FusionRouter` ne sont pas utilises par
+Prophet Studio.
+
 ## 0. Resume executif
 
 * **Jev** (TypeSafe AI, 15 sept. 2026) est un modele ferme qui ne genere pas de texte : il prend un etat
@@ -17,7 +22,7 @@ Version 1.0 - 18 septembre 2026. Documents associes : [01 Jev](01-JEV-typesafe-a
 * **La fusion** = un routeur a deux vitesses sur **un seul GPU de 8 Go** :
   1. **System One (clone de Jev)** : un petit GGUF (Ternary-Bonsai-1.7B, 0,37 Go, ou un Qwen3.5 entraine)
      lit les probabilites sur les options de chaque question via llama-server (grammaire + cache de
-     prefixe). ~50-150 ms par decision, jamais de texte libre.
+     prefixe). ~50-150 ms par decision vises (non mesure), jamais de texte libre.
   2. **Porte de confiance** : au-dessus d'un seuil calibre, le code agit sur la decision ; en dessous, ou
      si une question "meta" l'exige (risque, besoin de raisonnement), on escalade.
   3. **System Two (Bonsai 2 27B)** : raisonne (budget de reflexion proportionnel au risque), genere,

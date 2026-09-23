@@ -8,19 +8,19 @@ sections 5.5 et 5.6. Rien n'a encore tourne sur les vrais modeles.
 | Niveau | Ce que ca veut dire | Etat dans ce depot |
 |---|---|---|
 | **Systeme** : deux modeles, une API, une boucle | S1 decide la voie, le budget, les outils, le risque ; escalade vers S2 ; journal ; distillation S2 -> S1 | dans Studio : `prophet.py` (voie directe / agent, budget, garde-fou, verification), `calibrate.py` ; `fusion.py` (`FusionRouter`) : bibliotheque seulement (`jev serve`) ; `distill.py` : code pret, jamais execute sur les vrais modeles |
-| **Inference** : un modele *intervient dans le calcul* de l'autre | S2 appelle S1 comme outil ; S1 fixe la reflexion de S2 ; S1 pilote le decodage de S2, choisit parmi ses candidats, verifie ses reponses ; etat lu une fois par question grace au cache | dans Studio : `judge_*` (`tools.py`), budget de reflexion fixe **avant** la generation, verification finale, mode mono ; `guided.py` (S1 pendant le decodage, meilleur de N) : bibliotheque seulement |
+| **Inference** : un modele *intervient dans le calcul* de l'autre | S2 appelle S1 comme outil ; S1 fixe la reflexion de S2 ; S1 pilote le decodage de S2, choisit parmi ses candidats, verifie ses reponses ; etat lu une fois par requete S1, ses questions sur le prefixe en cache | dans Studio : `judge_*` (`tools.py`), budget de reflexion fixe **avant** la generation, verification finale, mode mono ; `guided.py` (S1 pendant le decodage, meilleur de N) : bibliotheque seulement |
 | **Modele** : un seul reseau, deux modes | le meme backbone sert de decideur (lecture restreinte, calibree) et de generateur (tete LM) ; entraine sur les deux objectifs | code pret pour le petit modele (`training/train_lora_rlcd.py --sft-data`), jamais execute, aucun clone entraine ; impossible sur Bonsai lui-meme (QAT proprietaire), donc Bonsai reste le "grand cerveau" au-dessus |
 
 Verdict : c'est une fusion au niveau systeme et, en partie, au niveau inference (Bonsai consulte S1 pendant sa boucle ;
 S1 fixe son budget de reflexion et verifie ses reponses). Le pilotage du decodage par S1 (`guided.py`) et le niveau
 modele sont ecrits mais ne sont pas utilises par Studio. Ce qui distingue le montage d'un simple "classificateur devant
 un LLM" :
-1. **L'etat d'une question est lu une fois** et partage par ses questions (cache de prefixe) ; en mode mono, Bonsai sert
-   aussi les decisions.
+1. **L'etat d'une requete S1 est lu une fois** (la premiere question remplit le cache du prefixe, les suivantes ne lisent
+   que leur propre texte) ; en mode mono, Bonsai sert aussi les decisions.
 2. **System Two est dans la boucle de System One** : il l'enseigne (distillation, trajectoires, chaine prete) et il le
    consulte (outils `judge_*`).
-3. **System One encadre System Two** : voie, budget de reflexion, outils exposes, garde-fou avant chaque action,
-   verification.
+3. **System One encadre System Two** : voie, budget de reflexion, outils exposes, garde-fou avant les commandes, le
+   code et les ecritures executables (pas en mode Jamais demander ; docs/12, 5.5.5-5.5.6), verification.
 4. Dans la bibliotheque (`guided.py`) : **System One dans la boucle de decodage de System Two**, pour decider quand
    Bonsai a fini de reflechir ; sur une RTX 4060 a ~30 tok/s estimes, 2 048 tokens de reflexion = ~70 s, c'est le poste
    que ce mode vise.

@@ -19,8 +19,10 @@ justesse et la calibration sur les questions "maison". Chaine complete sur A100 
 | Jeux publics (banking77, ag_news...) | `make_public_mix.py` | hors domaine : generalisation seulement, a petite dose (<= 20 %) |
 
 Format commun (une ligne JSON) : `{"state", "questions", "labels", "teacher_probs"?}` ; les champs en plus (`family`,
-`group`, `weak`...) sont ignores par l'entrainement. Les graines livrees (`jev_clone/seeds/`) ne vont jamais dans
-l'entrainement : le bouton Calibrer de Studio les lit.
+`group`, `weak`...) sont ignores par l'entrainement. Les graines livrees (`jev_clone/seeds/`) ne sont jamais des lignes
+d'entrainement : le bouton Calibrer de Studio les lit. Avec `--expand`, chaque graine fait toutefois ecrire a Bonsai des
+demandes qui heritent de ses etiquettes `intent`, `language`, `risk` : la calibration sur les graines n'est alors plus
+tenue a l'ecart.
 
 ## 2. Entrainement
 
@@ -64,7 +66,8 @@ l'installer. Sorties : `runs/jev-clone-f16.gguf`, `-Q8_0.gguf`, `-Q4_K_M.gguf`, 
    redemarrer les modeles.
 2. **Calibrer** quand il tourne (ou `python -m jev_clone.calibrate --server http://127.0.0.1:7881 --studio-model
    custom-s1-jev-clone-q8-0`) ; variante : **Importer une calibration** avec le `calibration.json` produit par
-   `jev_clone.calibrate --data data/calib.jsonl` sur le GGUF (notebook). Le `calibration.json` ecrit par
+   `jev_clone.calibrate --data data/calib.jsonl` sur le GGUF (notebook ; sans `--teacher`, `data/calib.jsonl` n'etiquette
+   pas `needs_reasoning`, que seules les graines calibrent). Le `calibration.json` ecrit par
    `train_lora_rlcd.py` (temperature seule, generique) n'est pas applique par Studio.
 3. `python training/eval_clone.py --server http://127.0.0.1:7881 --data data/val.jsonl` avant / apres.
 

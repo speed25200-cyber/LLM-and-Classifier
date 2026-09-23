@@ -18,7 +18,7 @@ plus le prefill d'un etat neuf ; rien n'est mesure).
 | Jugement | Effet |
 |---|---|
 | `direct` : une reponse courte suffit-elle sans outil ? | voie directe si >= 0,8 (ou seuil calibre, jamais sous 0,5), sans raisonnement, risque 0, hors effort profond et mode plan : Bonsai repond sans outils ni reflexion (600 tokens au plus) ; reprise en voie agent si la reponse est vide, contient NEEDS_TOOLS, est tronquee, pretend avoir agi, ou si la verification S1 est < 0,35 |
-| `needs_reasoning`, `risk` | budget de reflexion de Bonsai par niveau de risque : 0 / 512 / 2 048 / 6 144 tokens, au moins 512 si raisonnement ou lecture du risque pas sure ; plafond 60 % de `max_tokens` |
+| `needs_reasoning`, `risk` | budget de reflexion de Bonsai par niveau de risque : 0 / 512 / 2 048 / 6 144 tokens, au moins 512 si raisonnement ou lecture du risque pas sure ; plafond 60 % de `max_tokens` (dans Studio, 4 915 au plus : 6 144 n'est jamais atteint ; docs/12, 5.5.3) |
 | `clarify` | simple indice transmis a Bonsai, qui decide lui-meme de poser une question ou d'agir |
 | un noul par outil du catalogue | ordre de presentation ; au-dela de `max_tools` (12), seuls les pertinents sont exposes ; `done`, `remember`, `create_tool` et les `judge_*` restent toujours la |
 | `intent`, `language` | **observation seulement** (journal, entrainement), jamais un aiguillage |
@@ -40,7 +40,8 @@ prophet [agent, 84 s, verif 0.91] > Created expenses/ (Flask + Chart.js, tests p
 Outils de base : `write_file`, `edit_file`, `read_file`, `list_files`, `glob`, `grep`, `run_command`, `python`, `remember`,
 `create_tool`, `done`, plus `judge_*` ; `browse` (agent navigateur de `computer_use.py`, option `--browser`) et, dans Studio,
 `desktop`. Les outils crees vivent dans `.prophet/skills/<nom>.py` (TOOL + run), sont lus sans executer leur code et ne
-s'executent qu'a l'appel, apres le garde-fou ; les outils de fichiers n'ecrivent jamais dans `.prophet/`.
+s'executent qu'a l'appel, apres le garde-fou (Studio, mode Jamais demander : sans garde-fou, S1 n'est pas consulte ; REPL
+`--yes` : juges, sans confirmation) ; les outils de fichiers n'ecrivent jamais dans `.prophet/`.
 
 ```bash
 ./scripts/start_bonsai.sh ; ./scripts/start_jev_clone.sh        # ou le profil OrcaBonsai
@@ -51,7 +52,7 @@ jev prophet --workspace ~/prophet --browser                        # /quit pour 
 
 | Couche | Source | Volume |
 |---|---|---|
-| Graines | `training/seeds/prophet_seeds.jsonl` (copie livree : `jev_clone/seeds/`) : 82 demandes manuscrites (FR/EN), avec `direct`, `clarify`, `needs_reasoning`, `risk`, `intent`, `language` ; cas ambigus et cas pieges au risque maximal. Servent a la calibration (bouton Calibrer), jamais a l'entrainement | 82 |
+| Graines | `training/seeds/prophet_seeds.jsonl` (copie livree : `jev_clone/seeds/`) : 82 demandes manuscrites (FR/EN), avec `direct`, `clarify`, `needs_reasoning`, `risk`, `intent`, `language` ; cas ambigus et cas pieges au risque maximal. Servent a la calibration (bouton Calibrer) ; jamais des lignes d'entrainement elles-memes, mais avec `--expand` chaque graine fait ecrire a Bonsai des demandes qui heritent de ses etiquettes `intent`, `language`, `risk` (la calibration sur les graines n'est alors plus tenue a l'ecart) | 82 |
 | Synthese | `training/make_synthetic_prophet.py` : exemples par regles au format exact des appels de Prophet (pre-tour, garde-fou, outils, verification, voix), `--teacher` : Bonsai enseignant, `--expand` : graines etendues par Bonsai | 20 000 par defaut |
 | Usage | chaque tour de Prophet dans `.prophet/ledger.jsonl` (jugements, outils exposes et utilises, blocages, verification) ; trajectoires du computer use (`training/make_from_trajectories.py`) | croissant |
 
@@ -61,8 +62,8 @@ python training/make_synthetic_prophet.py --out data/train.jsonl --val data/val.
     --teacher http://127.0.0.1:8080                                                                                            # la nuit
 # puis A100 : training/train_lora_rlcd.py, training/merge_lora.py -> GGUF (training/README.md, colab/jev_bonsai_a100.ipynb)
 ```
-La calibration ne s'applique qu'aux questions du pre-tour (docs/12, section 5.2). Rien de cette chaine n'a encore tourne
-sur de vrais poids.
+Calibree sur les graines ou sur `data/calib.jsonl`, la calibration ne touche que les questions du pre-tour (docs/12,
+section 5.2). Rien de cette chaine n'a encore tourne sur de vrais poids.
 
 ## 3. Ce que Prophet fait au jour 1, et ce qui reste
 
@@ -77,6 +78,6 @@ application simple = quelques minutes de generation ; mesure : `eval/SCOREBOARD.
 
 Bonsai (surtout avec OrcaBonsai) fera ce qu'on lui demande ; la securite est dans le clone et dans vous : jugement de
 risque avant chaque commande, code, nouvel outil, appel d'outil cree, navigation et ecriture de fichier executable, avec
-le contenu des scripts que la commande lance ; confirmation selon le verdict (masse risquee, arrets obligatoires) ; espace
-de travail borne ; journal. Dans le REPL, `--yes` supprime les confirmations : reserve a un bac a sable. Dans Studio, les
+le contenu des scripts que la commande lance (pas dans le mode Jamais demander de Studio, qui ne consulte pas le clone) ;
+confirmation selon le verdict (masse risquee, arrets obligatoires) ; espace de travail borne ; journal. Dans le REPL, `--yes` supprime les confirmations : reserve a un bac a sable. Dans Studio, les
 modes Smart, Toujours demander et Jamais demander (docs/12, section 5.5.6).

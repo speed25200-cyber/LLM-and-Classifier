@@ -13,14 +13,14 @@ Seuls les chiffres **publics** de Jev sont opposables. Les colonnes "clone" se r
 | ... latence p50 / p95 | 421,6 / 542,0 ms (API) | idem | | | | < 100 / 150 ms (local, llama.cpp) ; < 50 ms (torch) |
 | MMLU 1 200 items : ECE apres temperature | 0,031 | annonce TypeSafe | | | | <= 0,030 |
 | MMLU 1 200 items : accuracy | non publie | (reflex 4B : 72 %) | | | | >= 72 % (4B) |
-| Options par question | 255 | docs TypeSafe | 255 (lettres <= 26, noms au-dela) | 255 | 255 (+ rank illimite) | rang de N candidats illimite (nouls paralleles) |
+| Options par question | 255 | docs TypeSafe | 255 (lettres <= 26, noms au-dela) ; rang : un noul par candidat, 50 au plus via `judge_rank` | idem | idem | rang de N candidats illimite (nouls paralleles) |
 | Etat maximal | 32 k tokens (64 k avec les questions) | docs TypeSafe | 8-32 k selon `-c` (Studio : 8 k par slot) | idem | idem | 32 k |
 | Cout par decision | ~0,0004 $ (workflow) ; 0,042 $/M tokens | TypeSafe | 0 $ | 0 $ | 0 $ | 0 $ |
 | Garantie de couverture (prediction conforme) | aucune publiee | - | non | non | prevu (`conformal.py` : bibliotheque seulement, branche nulle part) | garantie 1-alpha, verifiee |
 | Porte a risque controle (binomiale exacte) | aucune publiee | - | non | non | prevu (`conformal.py`, idem) | erreur <= alpha a 90 % |
 | Images dans l'etat | non documente | - | non (llama.cpp texte) | non | prevu (clone VL, `engine_torch.py` : a venir) | oui |
 | Le LLM consulte le decideur (outils) | non (produit separe) | - | oui | oui | oui | oui |
-| Boucle d'amelioration locale (S2 enseigne S1) | non | - | journaux et scripts prets, jamais executee | oui | oui | oui |
+| Boucle d'amelioration locale (S2 enseigne S1) | non | - | journaux et scripts prets, jamais executee | prevu | prevu | oui |
 | Donnees hors machine | oui (API) | - | non | non | non | non |
 
 Protocole de mesure : `python -m eval.jev_benchmark --server ... --name clone-l0 --repeat 5` puis `--analyze` ;
@@ -77,7 +77,8 @@ Lecture du tableau :
   doivent etre presentes ; sans grammaire, c'est la part de la distribution du token suivant que le classifieur met de
   lui-meme sur les etiquettes (zero-shot : plus elle est basse, plus la decision depend de la grammaire).
 * **reflexion** : `thinking_budget_tokens` envoye comme le fait Prophet (0 = reflexion coupee), tokens de reflexion
-  comptes par le tokenizer du serveur ; respecte = 0 pour le budget 0, au plus 512 (+ 5 %) pour le budget 512.
+  comptes par le tokenizer du serveur ; respecte = 0 pour le budget 0, au plus 512 (+ 5 %) pour le budget 512. Un budget
+  au-dessus du `--reasoning-budget 2048` du serveur (Prophet dans Studio envoie jusqu'a 4 915) n'est pas teste.
 * **tours** : une question courte (voie directe attendue) puis une tache qui cree un fichier (voie agent attendue), chacune
   dans une session neuve et un dossier temporaire, en `permission_mode` auto (aucune confirmation), supprimes ensuite.
   La voie prise est celle que S1 a choisie (reprise en voie agent comprise) ; "invariants NON" signale une incoherence
@@ -117,10 +118,10 @@ Test d'integration sur les vrais modeles (un tour Prophet complet en voie agent,
 7881 / 7880 sont les ports de Studio par defaut) :
 
 ```sh
-JEV_TEST_S1=http://127.0.0.1:7881 JEV_TEST_S2=http://127.0.0.1:7880 uv run --extra dev pytest -q tests/test_live_duo.py
+JEV_TEST_S1=http://127.0.0.1:7881 JEV_TEST_S2=http://127.0.0.1:7880 uv run --extra studio --extra dev pytest -q tests/test_live_duo.py
 ```
 
 ```powershell
 $env:JEV_TEST_S1 = 'http://127.0.0.1:7881'; $env:JEV_TEST_S2 = 'http://127.0.0.1:7880'
-uv run --extra dev pytest -q tests/test_live_duo.py
+uv run --extra studio --extra dev pytest -q tests/test_live_duo.py
 ```

@@ -70,14 +70,18 @@ Effet par role de la fusion :
 
 Avec l'adaptateur, Bonsai ne refusera presque plus rien. Le garde-fou n'est donc plus dans le modele de
 generation, il est dans **les decisions typees et le code** :
-1. la question `risk` (score) et la **porte a risque controle** (`conformal.py`) avant toute action ; au-dela
-   d'un niveau, **confirmation humaine obligatoire** pour les actions irreversibles (paiement, suppression,
-   envoi, commandes systeme) ; c'est exactement la tache du benchmark jev-benchmark (readonly / destructive /
-   privileged / exfiltration) ;
-2. la verification System One apres chaque action (`verify`), les deux echecs consecutifs qui rendent la main ;
-3. l'executeur deterministe : liste blanche d'actions, de domaines et de commandes, aucune saisie inventee
-   (slots) ;
-4. le journal complet (`runs/ledger.jsonl`, `runs/trajectories.jsonl`) ;
+1. le garde-fou du clone (`jev_clone/guard.py` : `tool_risk`, `risk`, `policy_violation` ; docs/12, 5.5.5) avant les
+   commandes, le code, les outils crees, la navigation, les pas du computer use et l'ecriture de fichiers executables ;
+   au-dela des seuils, **confirmation humaine**, obligatoire pour les verdicts les plus risques. Dans Studio, le mode
+   Jamais demander ne consulte pas le clone pour les outils de Prophet. C'est la tache du benchmark jev-benchmark
+   (readonly / destructive / privileged / exfiltration). La porte a risque controle de `conformal.py` n'est branchee
+   nulle part ;
+2. la verification System One apres chaque action rapide du computer use, les deux echecs consecutifs qui rendent la
+   main a Bonsai ;
+3. l'executeur : aucune saisie inventee (le texte tape vient des slots) ; il n'y a pas de liste blanche d'actions, de
+   domaines ou de commandes ;
+4. le journal (`<espace de travail>/.prophet/ledger.jsonl` pour Prophet, `<donnees>/runs/trajectories.jsonl` pour le
+   computer use de Studio, `runs/ledger.jsonl` pour `jev serve`) ;
 5. l'echelle : 1,0 suffit (projection exacte) ; 2,0 "retourne les cas tetus" au prix de la qualite ; >= 3
    degrade puis effondre le modele. Le profil fixe 1,0.
 

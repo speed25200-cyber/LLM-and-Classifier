@@ -12,10 +12,17 @@ et macOS. Rien de ce qui suit n'a encore tourne sur les vrais modeles ni sur un 
 
 | Methode | Pour qui | Commande |
 |---|---|---|
-| Application de bureau | Windows, le plus simple | `Prophet Studio_x.y.z_x64-setup.exe` ou `.msi` : Releases (etiquette `v*`) ou artefacts du workflow **Bureau** (`.github/workflows/desktop.yml`) |
-| Une ligne PowerShell | Windows, sans installeur | voir ci-dessous |
+| Application de bureau | Windows (paquet actuel perime, voir ci-dessous) | `Prophet Studio_x.y.z_x64-setup.exe` ou `.msi` : artefacts du workflow **Bureau** (`.github/workflows/desktop.yml`) |
+| Une ligne PowerShell | Windows, code a jour | voir ci-dessous |
 | Une ligne shell | Linux / macOS | voir ci-dessous |
 | Depuis les sources | developpeurs | `uv sync --extra studio` puis `uv run prophet-studio` |
+
+Application de bureau : aucune release GitHub ni etiquette `v*` n'existe (sur une etiquette, `desktop.yml` ne cree qu'un
+brouillon, a publier a la main). Les seuls paquets construits sont les artefacts de l'execution #2 du workflow Bureau, au
+commit `0194265`, avant le cycle d'audit et de correctifs : ils embarquent le coeur (`jev_clone/`, `prophet_studio/`) de ce
+commit, sans le comportement decrit en section 5. Le workflow ne se relance que si `desktop/`, `uv.lock` ou `desktop.yml`
+changent : pour un paquet a jour, le lancer a la main (Actions > Bureau > Run workflow) ou construire localement
+([`desktop/README.md`](../desktop/README.md)).
 
 Tant que la branche `claude/local-llm-high-performance-q4wk6f` n'est pas fusionnee dans `main`, les URL `.../main/installer/...`
 repondent 404 : prendre le script sur la branche et lui passer la meme reference (`-Ref` / `--ref`) pour le code.
@@ -83,18 +90,20 @@ remplacer par des mesures, section 5.7) :
 Pourquoi le classifieur passe sur CPU a 8 Go : Bonsai 2 PTQ1_0 prend 5,52 Gio de poids + ~1 Gio de tampons ; le
 classifieur 1.7B demanderait ~1,1 Gio de plus (poids, tampons, KV 8 k en q8_0), soit presque tout le contexte. Sur CPU,
 le planificateur estime ~0,1-0,35 s par decision une fois l'etat lu, plus ~0,5-1 s pour lire un etat neuf de ~2 k tokens
-(prefill CPU) ; Bonsai garde 24 a 48 k de contexte. Estimations seulement : section 5.1 et 5.7.
+(prefill CPU). Contexte de Bonsai selon la VRAM deja occupee (priorites equilibre et contexte) : 32 k jusqu'a ~500 Mio
+(48 a 64 k en priorite contexte sous ~300 Mio), 24 k jusqu'a ~750 Mio, 16 k a 0,8-0,9 Gio, 12 k a 1 Gio. Estimations
+seulement : section 5.1 et 5.7.
 
 Specificites Blackwell :
 * **runtime** : la build CUDA 12.8 (ou 13.x) du fork PrismML est choisie automatiquement (`installer.py`,
   `select_runtime_assets`) ; sous Windows le zip `cudart` de la meme version est ajoute. Pilote >= 570 requis ;
   l'assistant le signale sinon.
 * **ecran** : si l'ecran est branche sur la 5060, Windows y reserve 0,3-1 Gio ; le brancher sur la carte mere
-  (iGPU) donne +8 k de contexte. Detecte par NVML (`display_active`).
+  (iGPU) rend 32 k de contexte au lieu de 12 a 24 k. Detecte par NVML (`display_active`).
 * **interface sans VRAM** : l'application de bureau desactive le rendu GPU de WebView2 (reglage "Economie de
   VRAM", actif par defaut) ; animations limitees a transform/opacity, en pause quand la fenetre est cachee.
-* **classifieur sur CPU sans VRAM** : `--device none` et `CUDA_VISIBLE_DEVICES=-1` (`supervisor.server_env`) : le
-  binaire CUDA ne cree ni contexte ni tampon sur la carte.
+* **classifieur sur CPU sans VRAM** : `--device none` et `CUDA_VISIBLE_DEVICES=-1` (`supervisor.server_env`), pour que le
+  binaire CUDA ne cree ni contexte ni tampon sur la carte (effet attendu, jamais observe sur un vrai GPU).
 * **echelle anti-OOM** (`planner.degrade`) : si llama-server echoue en "out of memory" au chargement, le
   superviseur descend d'un cran et relance seul : 2e slot retire -> vision en RAM -> classifieur sur CPU -> contexte
   reduit -> KV q4_0 -> 4 k -> Bonsai 27B 1-bit -> dechargement partiel. OOM du seul classifieur sur GPU : il passe
@@ -111,7 +120,7 @@ Profils equivalents pour les scripts shell : `scripts/profiles/rtx5060-8gb-equil
 Chaque tour montre ce que la fusion fait :
 1. **Bandeau System One** : voie (reponse directe, agent, ou "direct -> agent" si la voie directe a ete reprise),
    besoin de raisonnement, risque, budget de reflexion accorde a Bonsai, "non calibre" si aucune calibration ne
-   s'appliquait a ce tour ; deplie, les jugements, les seuils calibres et la pertinence de chaque outil.
+   s'appliquait a ce tour ; deplie, les jugements, les seuils calibres et la pertinence des 8 outils les plus pertinents.
 2. **Reflexion** de Bonsai en direct (repliee ensuite, avec sa duree).
 3. **Outils** en cartes : diff des fichiers ecrits / modifies (`edit_file` par remplacement exact, economique en
    contexte), sortie de terminal, fichiers trouves, jugements `judge_*`, progression par pas du computer use.
@@ -163,11 +172,17 @@ Chaque tour montre ce que la fusion fait :
   lectures qui retiennent cette option soient justes a 95 % (cible par defaut). Aucune valeur n'atteint la cible : `null`,
   Prophet ne prend jamais seul cette decision ("voie directe coupee par la calibration").
 * **Portee** : une temperature ne s'applique qu'a la meme question (empreinte : type, consigne, options) lue sur un etat
-  de meme forme (cle `request`). Donc **le pre-tour seulement** : garde-fou, pertinence des outils, verification, voix,
-  computer use et `judge_*` restent lus bruts, avec leurs seuils fixes.
+  de meme forme (cle `request`). Avec les graines ou `data/calib.jsonl`, **seul le pre-tour est calibre** : garde-fou,
+  pertinence des outils, verification, voix, computer use et `judge_*` restent lus bruts, avec leurs seuils fixes.
+  Un fichier `--data` qui etiquette d'autres questions (par exemple `data/val.jsonl` : garde-fou, outils, voix) les
+  calibre aussi ; avec `--studio-model` ou importe dans Studio, ces entrees sont appliquees (garde-fou compris) : pour
+  Studio, ne calibrer que sur le pre-tour.
 * **Lien aux poids** : `<donnees>/runs/calibration/<id>.json` enregistre le GGUF calibre (chemin, taille, date, empreinte
-  SHA-256 du premier et du dernier Mio). GGUF remplace, deplace ou autre fichier pour ce modele : calibration perimee,
-  jamais appliquee, signalee dans l'ecran Modeles. Re-importer un GGUF sous le meme id efface sa calibration.
+  SHA-256 du premier et du dernier Mio). GGUF calibre remplace, deplace ou supprime : calibration perimee, jamais appliquee,
+  signalee dans l'ecran Modeles. Re-importer un GGUF sous le meme id, ou retirer un modele importe, efface sa calibration.
+  Cas non couvert : si le registre pointe vers un autre GGUF que celui calibre (modele du catalogue retelecharge sous un
+  autre nom, par exemple) et que l'ancien fichier existe encore inchange, l'ecran Modeles dit la calibration perimee mais
+  le moteur l'applique quand meme (au chargement, seul le fichier calibre est verifie) : recalibrer.
 * **Jamais appliquee** : en mode mono ; calibration generique (temperature seule, par exemple celle ecrite par
   `train_lora_rlcd.py`) ; fichier dont aucune question n'est reconnue. **Seuils perimes** (fichier sans `meta.version`
   >= 2) : temperatures appliquees, seuils ignores (portes par defaut), signale "seuils a recalculer".
@@ -185,17 +200,24 @@ Chaine complete : [`training/README.md`](../training/README.md), notebook A100 `
    Bonsai).
 3. Export : `training/merge_lora.py` -> GGUF f16, Q8_0, Q4_K_M (fork PrismML au tag du runtime de Studio).
 4. Studio : **Modeles > Importer un GGUF**, role **Classifieur** (id `custom-s1-...` tire du nom du fichier, choisi pour le
-   prochain demarrage), redemarrer les modeles, puis **Calibrer** (ou importer le `calibration.json` calcule sur `data/calib.jsonl`).
+   prochain demarrage), redemarrer les modeles, puis **Calibrer** (ou importer le `calibration.json` calcule sur
+   `data/calib.jsonl`). Sans `--teacher`, `data/calib.jsonl` n'etiquette que `direct`, `clarify`, `intent`, `language` et
+   `risk` (les etiquettes estimees sont retirees) : `needs_reasoning` n'y est pas calibre ; seules les graines (bouton
+   Calibrer, ou `calibrate` sans `--data` : 82 graines x 6 questions) couvrent les 6 questions.
 5. Comparer avant / apres : `python training/eval_clone.py --server http://127.0.0.1:7881 --data data/val.jsonl`.
 
 ### 5.4 Mode mono
 
-* **Quand** : classifieur non installe au demarrage, echec de son demarrage, ou arret inattendu non rattrape (5.5.10).
+* **Quand** : classifieur non installe au demarrage, echec de son demarrage, ou arret inattendu (des le premier, pendant
+  la relance automatique ; 5.5.10).
 * **Effet** : les questions S1 vont a Bonsai (meme lecture par grammaire, pourcentages bruts, aucune calibration). Bonsai
   prend un 2e slot seulement si le classifieur etait absent au lancement et que la memoire rendue le permet (VRAM prevue
   pour un S1 sur GPU, ou RAM si Bonsai tourne sur CPU). Sur une RTX 5060 en equilibre (S1 prevu sur CPU), Bonsai garde un
-  slot : les lectures S1 attendent la fin de la generation en cours. Decisions plus lentes, non mesurees.
-* **Retour** : un classifieur installe apres coup (ou dont le fichier change) demarre sans relancer Bonsai et le duo revient.
+  slot : les lectures S1 attendent la fin de la generation en cours et prennent la place de la conversation dans le cache
+  du slot ; Bonsai relit alors l'invite (le cache en RAM, `--cache-ram 2048`, peut en eviter une partie). Decisions et
+  tours plus lents, non mesures.
+* **Retour** : un classifieur installe apres coup (ou dont le fichier change) demarre sans relancer Bonsai et le duo
+  revient ; redemarrer les modeles relance aussi le classifieur.
 
 ### 5.5 Les mecanismes de cooperation
 
@@ -211,16 +233,21 @@ calibration, seuil calibre de la decision 'oui' sinon) ; sans reflexion (`needs_
 plus probable, et probabilite du niveau 0 >= son seuil) ; effort different de "profond" ; hors mode plan. Bonsai repond alors
 sans outils, sans reflexion, en 600 tokens au plus. Reprise en voie agent si la reponse est vide, contient `NEEDS_TOOLS`,
 est tronquee, pretend avoir cree / modifie / execute quelque chose ou ne pas avoir acces, ou si la verification S1 est
-< 0,35 ; budget alors >= 512 (sauf effort rapide). Le bandeau affiche "direct -> agent" et la raison.
+< 0,35 ; budget alors >= 512 (sauf effort rapide). Le bandeau S1 affiche "direct -> agent" ; la raison est donnee sous le
+bandeau, dans le message ("Reponse directe ecartee (...) : reprise avec les outils.").
 
 **5.5.3 Budget de reflexion.** Niveau de risque 0 / 1 / 2 / 3 -> 0 / 512 / 2 048 / 6 144 tokens ; au moins 512 si
 `needs_reasoning` ou si la lecture du risque n'est pas sure ; effort rapide = 0, profond = 6 144. Plafond : 60 % de
-`max_tokens` (Studio : `max_tokens` = contexte / 3, borne a [1 024, 8 192], soit 8 192 et un plafond de 4 915 a 24-32 k).
-Envoye par requete (`thinking_budget_tokens` ; 0 coupe aussi `enable_thinking`).
+`max_tokens`. Studio fixe `max_tokens` = contexte de Bonsai / 3, borne a [1 024, 8 192] : plafond de 4 915 des 24 k (a 48 k
+ou 128 k aussi), 3 276 a 16 k, 2 457 a 12 k, moins encore apres un cran anti-OOM. **Dans Studio, 6 144 n'est donc jamais
+atteint** : risque 3 et effort profond donnent 4 915 au plus. Envoye par requete (`thinking_budget_tokens` ; 0 coupe aussi
+`enable_thinking`). Le serveur de Bonsai est lance avec `--reasoning-budget 2048` (1 024 sur CPU ou en dechargement
+partiel) : d'apres le source du fork (prism-b10683, `tools/server/server-common.cpp`), ce n'est qu'une valeur par defaut,
+remplacee par le budget de la requete. Non observe sur le vrai modele : la mesure (5.7) ne teste que les budgets 0 et 512.
 
 **5.5.4 Pertinence des outils.** Une requete S1 : un noul par outil du catalogue hors `done`, `remember`, `create_tool`,
-sur la demande (2 000 caracteres) et les 4 derniers echanges. Sert a l'ordre de presentation ; au-dela de 12 outils
-(`max_tools` : 9 + les 3 de base), les moins pertinents ne sont pas exposes. Catalogue par defaut : 8 outils hors base,
+sur la demande (2 000 caracteres) et les 4 derniers messages (400 caracteres chacun). Sert a l'ordre de presentation ;
+au-dela de 12 outils (`max_tools` : 9 + les 3 de base), les moins pertinents ne sont pas exposes. Catalogue par defaut : 8 outils hors base,
 donc aucun filtre, seulement l'ordre ; `browse`, `desktop` et les outils crees par Prophet s'y ajoutent. Les `judge_*` sont
 toujours exposes. Classifieur en panne : ordre du catalogue.
 
@@ -232,8 +259,9 @@ toujours exposes. Classifieur en panne : ordre du catalogue.
   classifieur en panne, action trop longue pour etre vue en entier, script lance mais invisible, action qui vise
   `.prophet/skills`.
 * **Confirmation** (`needs_confirmation`) : arret obligatoire, ou `p_risky` >= `danger_threshold` (0,35), ou `risk` >= 1,5.
-* **Ce qui passe par le garde-fou** : `run_command`, `python`, `create_tool`, chaque appel d'un outil cree par Prophet (son
-  code est montre), `browse`, `desktop`, et `write_file` / `edit_file` hors mode Jamais demander.
+* **Ce qui passe par le garde-fou** (modes Smart et Toujours demander ; en Jamais demander, rien) : `run_command`,
+  `python`, `create_tool`, chaque appel d'un outil cree par Prophet (son code est montre), `browse`, `desktop`, et
+  `write_file` / `edit_file` d'un fichier executable. Jamais : `read_file`, `list_files`, `glob`, `grep`, `remember`, `done`.
 * **A l'ecriture** : seul un fichier qui peut s'executer est juge (suffixe de script, nom connu comme `Makefile` ou
   `package.json`, sans extension, sous `.git`, `.githooks`, `.husky`, `.vscode`, `.github`, ou commencant par `#!`) ; une
   retouche montre la modification et le fichier qui en resulte (entier jusqu'a 16 000 caracteres, sinon la zone modifiee
@@ -260,8 +288,8 @@ toujours exposes. Classifieur en panne : ordre du catalogue.
 |---|---|---|
 | **Smart** | le classifieur juge ; demande seulement si confirmation requise (dont les arrets obligatoires) | pas risque : demande |
 | **Toujours demander** | chaque action gardee est demandee (avec le verdict du classifieur quand il juge) | seuls les pas juges risques |
-| **Jamais demander** | aucune question, le classifieur n'est pas consulte, aucun arret obligatoire (seule l'ecriture dans `.prophet/` reste refusee) | les pas restent juges mais s'executent sans question |
-| mode plan (`/plan`) | toute action qui modifie est refusee ; outils crees ni charges ni executes | - |
+| **Jamais demander** | aucune question, le classifieur n'est pas consulte, aucun arret obligatoire ; seuls les outils de fichiers refusent `.prophet/` : une commande ou du Python, non juges, peuvent y ecrire (y compris `.prophet/skills`, charge comme outil au tour suivant) | les pas restent juges mais s'executent sans question |
+| mode plan (`/plan`) | ecritures, commandes, Python, `create_tool`, navigateur et bureau refuses ; outils crees ni charges ni executes ; seul `remember` ecrit encore (`.prophet/memory.jsonl`) | - |
 
 **« Toujours pour cet outil »** : autorisation memorisee pour la session, par couple (outil, classe jugee par S1), ou par
 outil pour une action non jugee (fichier de donnees en mode Toujours demander). Jamais proposee pour un arret obligatoire
@@ -286,7 +314,8 @@ appeles, blocages, verification, statistiques S1 / S2).
   repli (5.5.1), ordre du catalogue, garde-fou en arret obligatoire (confirmation meme en Smart ; Jamais demander ne
   consulte pas S1), verification absente.
 * **Watchdog** (toutes les 2 s) : S1 arrete tout seul -> mode mono immediat pour les tours suivants et une relance dans son
-  propre fil (jusqu'a 180 s) ; 2e arret ou relance ratee -> mode mono jusqu'a ce que le fichier du classifieur change.
+  propre fil (jusqu'a 180 s) ; 2e arret ou relance ratee -> mode mono jusqu'a ce que le fichier du classifieur change ou
+  que les modeles soient redemarres.
 * **S2 arrete tout seul** : relance une fois avec les memes arguments (etat "starting", "redemarrage de Bonsai" dans la
   barre d'etat) ; 2e arret -> etat error. Le tour en cours s'arrete sur une erreur.
 
@@ -349,12 +378,13 @@ donne une mesure plus courte.
 Tests en direct (sautes sans ces variables) :
 ```powershell
 $env:JEV_TEST_S1 = 'http://127.0.0.1:7881'; $env:JEV_TEST_S2 = 'http://127.0.0.1:7880'
-uv run --extra dev pytest -q tests/test_live_duo.py        # un tour Prophet complet (voie agent) + plomberie de la mesure
+uv run --extra studio --extra dev pytest -q tests/test_live_duo.py   # un tour Prophet complet (voie agent) + plomberie de la mesure
 $env:JEV_TEST_SERVER = 'http://127.0.0.1:7881'
-uv run --extra dev pytest -q tests/test_live_llamacpp.py tests/test_values_mode.py tests/test_guided.py
+uv run --extra studio --extra dev pytest -q tests/test_live_llamacpp.py tests/test_values_mode.py tests/test_guided.py
 ```
-Chaine d'entrainement : `JEV_TEACHER_URL` (Bonsai, 7880), `JEV_S1_EVAL_URL` (classifieur, 7881), `MERGE_LORA_ADAPTER` +
-`LLAMA_CPP_DIR` (`tests/test_train_chain.py`).
+`--extra studio` est necessaire : un test de `test_live_duo.py` lance Studio en mode demo (uvicorn). Chaine
+d'entrainement : `JEV_TEACHER_URL` (Bonsai, 7880), `JEV_S1_EVAL_URL` (classifieur, 7881), `MERGE_LORA_ADAPTER` (adaptateur
+LoRA entraine) + `LLAMA_CPP_DIR` (source llama.cpp) (`tests/test_train_chain.py`).
 
 ## 6. Voix
 
@@ -383,21 +413,28 @@ Chaine d'entrainement : `JEV_TEACHER_URL` (Bonsai, 7880), `JEV_S1_EVAL_URL` (cla
 Desactive par defaut ; reglages "Outil navigateur (computer use)" et "Controle du bureau (computer use)". Un outil
 active mais indisponible n'est jamais propose a Bonsai (l'ecran Reglages dit pourquoi).
 * **Navigateur** (`browse`) : Playwright et Chromium, navigateur invisible (headless), arbre ARIA. **Playwright n'est pas
-  dans l'extra `studio`** : les installeurs ne l'installent pas ; il faut l'ajouter a l'environnement Python de Studio
-  (`<donnees>/app-venv` des scripts, `<donnees>/venv` de l'application de bureau, `.venv` depuis les sources), par exemple
-  `uv pip install --python <python de cet environnement> playwright` puis `<python> -m playwright install chromium`
-  (non essaye ici ; l'ecran Reglages dit si l'outil est disponible).
+  dans l'extra `studio`** : les installeurs ne l'installent pas. Depuis les sources : `uv sync --extra studio --extra agent`
+  puis `uv run playwright install chromium`. Sinon, l'ajouter a l'environnement Python de Studio (`<donnees>/app-venv` des
+  scripts, `<donnees>/venv` de l'application de bureau), par exemple `uv pip install --python <python de cet environnement>
+  playwright` puis `<python> -m playwright install chromium` (non essaye ici ; l'ecran Reglages dit si l'outil est
+  disponible). Un ajout a la main ne survit pas a une mise a jour par les scripts : ils relancent `uv sync --extra studio`,
+  qui retire tout paquet hors de ses extras (de meme `uv sync --extra studio` depuis les sources) ; le refaire apres chaque
+  mise a jour. L'application de bureau le garde (`uv run` ne retire rien).
 * **Bureau** (`desktop`, Windows seulement) : l'arbre **UI Automation** de la fenetre active (paquet `uiautomation`,
   installe par l'extra `studio` sous Windows) joue le role de l'arbre ARIA ; Bonsai a en plus `press_keys` et `open_app`.
 * L'appel de l'outil est juge comme les autres actions, puis chaque pas (section 5.5.12). Pas de capture d'ecran ni de
   vision dans Studio : le clone et Bonsai decident sur l'arbre texte. Progression par pas dans la carte de l'outil.
+* Bonsai est pourtant lance avec son projecteur vision s'il est installe (il l'est par defaut) : en RAM sur 8 Go
+  (`--mmproj ... --no-mmproj-offload`, ~0,63 Gio), en VRAM a partir de ~11,5 Go. L'agent n'envoie jamais d'image ; seul le
+  proxy `/v1/chat/completions` peut s'en servir.
 
 ## 8. API locale et securite
 
 Le coeur peut executer des commandes : il n'ecoute que sur 127.0.0.1 et exige un **jeton** tire au lancement
 (en-tete `X-Prophet-Token` ou `Authorization: Bearer`), un en-tete `Host` local (parade au DNS rebinding) et une
 `Origin` absente ou autorisee (l'interface elle-meme, l'application Tauri). Le jeton est ecrit dans
-`core.json` (droits 600) et injecte dans la page servie.
+`core.json` et injecte dans la page servie. Droits 600 sous Linux et macOS ; sous Windows, aucun changement de droits :
+seules les ACL par defaut du dossier utilisateur (`%LOCALAPPDATA%`) le protegent.
 
 Pour brancher d'autres outils : `POST /v1/chat/completions` (Bonsai, compatible OpenAI, diffusion comprise) et
 `POST /v1/systemone` (decisions typees au format TypeSafe, lues par le classifieur en marche ; en mode mono par Bonsai,
@@ -418,14 +455,17 @@ cd desktop && npm ci && npm run sidecar && npm run dev   # application de bureau
 reproductibles). La CI (`.github/workflows/ci.yml`) lance les tests Python sous Linux et Windows (Python 3.11, Chromium de
 Playwright), verifie et construit l'interface, et passe `cargo fmt` / `clippy` / `test` sur la coquille ; `desktop.yml`
 construit les paquets (NSIS + MSI sous Windows, deb + AppImage sous Linux, app + dmg sous macOS Apple Silicon) sur une
-etiquette `v*`, un lancement manuel ou une modification de `desktop/`.
+etiquette `v*` (brouillon de release), un lancement manuel ou une modification de `desktop/`, `uv.lock` ou du workflow ;
+pas sur une modification de `jev_clone/` ou `prophet_studio/`, que les paquets embarquent pourtant.
 
 ## 10. Ce qui est verifie, ce qui ne l'est pas
 
 Verifie ici (Linux, sans GPU) :
-* `uv run --no-sync pytest -q` : **349 tests passent, 9 sont sautes**. Les 9 attendent de vrais serveurs :
-  `JEV_TEST_SERVER` (4), `JEV_TEST_S1` / `JEV_TEST_S2` (2), `JEV_TEACHER_URL`, `JEV_S1_EVAL_URL`, `MERGE_LORA_ADAPTER` +
-  `LLAMA_CPP_DIR` (3).
+* `uv run --no-sync pytest -q` (Linux, avec Chromium de Playwright, Node >= 22.6, `npm ci` fait dans `ui/`, et git ; sans
+  eux, d'autres tests sont sautes) : **349 tests passent, 9 sont sautes**. 8 attendent de vrais serveurs : `JEV_TEST_SERVER` (4), `JEV_TEST_S1` / `JEV_TEST_S2` (2), `JEV_TEACHER_URL`,
+  `JEV_S1_EVAL_URL` ; 1 attend un adaptateur LoRA entraine et une source llama.cpp (`MERGE_LORA_ADAPTER` + `LLAMA_CPP_DIR`).
+  Sous Windows, quelques tests de plus sont sautes par construction (signaux et groupes de processus Unix, scripts POSIX) :
+  le compte differe.
 * le coeur de bout en bout contre de faux llama-server lances par le vrai superviseur : plan RTX 5060, demarrage,
   echelle anti-OOM, watchdog et mode mono, tours d'agent en flux, voie directe et reprise, autorisations et revocation,
   garde-fou (tests de regression de l'analyse des commandes et du decoupage), calibration par modele, annulation, mode
@@ -438,6 +478,9 @@ Verifie ici (Linux, sans GPU) :
 Configure dans la CI (etat de chaque commit : onglet Actions du depot) : tests Python sur `ubuntu-latest` et
 `windows-latest` ; interface (`npm run check`, `npm run build`) ; coquille Tauri (`cargo fmt`, `clippy`, `test`) ; paquets
 NSIS + MSI (`windows-latest`), deb + AppImage (`ubuntu-22.04`), app + dmg (`macos-14`) : construits, jamais executes.
+Etat : au commit `fbec3b9` (CI #16), les quatre jobs passent, tests Windows compris ; les executions #9 a #15 etaient en
+echec (#14 annulee). Paquets : une seule construction reussie (workflow Bureau #2, commit `0194265`, avant le cycle
+d'audit), non reconstruits depuis (section 1).
 
 Non verifie :
 * **rien n'a tourne sur les vrais modeles** (Ternary-Bonsai, Bonsai 2 27B) **ni sur un vrai GPU** : latences S1, debits
@@ -445,8 +488,10 @@ Non verifie :
   mesurer) ;
 * la calibration et les seuils sur un vrai classifieur ; aucun clone entraine n'existe ; la chaine d'entrainement n'a
   jamais tourne sur de vrais poids ;
-* les installeurs construits par la CI (NSIS, MSI, dmg) n'ont jamais ete executes sous Windows ni macOS ; l'application
-  de bureau sous Windows (WebView2, Job Object, gain de VRAM de `--disable-gpu`) et macOS ;
+* le budget de reflexion d'une requete au-dessus du `--reasoning-budget 2048` du serveur (5.5.3) : lu dans le source du
+  fork, jamais observe ;
+* les installeurs construits par la CI (NSIS, MSI, dmg) n'ont jamais ete executes sous Windows ni macOS (et datent d'avant
+  le cycle d'audit) ; l'application de bureau sous Windows (WebView2, Job Object, gain de VRAM de `--disable-gpu`) et macOS ;
 * UI Automation sur un vrai Windows, la voix avec les vrais modeles, le micro de WebKitGTK sous Linux ;
 * les noms exacts des assets de la release PrismML pour Windows (choix sur la liste reelle, noms construits en repli) et
   des archives vocales sherpa-onnx ;

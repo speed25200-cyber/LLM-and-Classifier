@@ -18,12 +18,12 @@ tout ce que Jev **ne fait pas**.
 
 | Axe | Jev | Ce depot | Ou |
 |---|---|---|---|
-| 1. Latence | 70-500 ms via API (p50 mesure 422 ms) | llama.cpp local : 100-250 ms ; **torch en passe unique : cible < 50 ms** pour 10 questions sur 0,8B (une passe GPU, aucune requete HTTP) | `engine_torch.py` |
-| 2. Garanties formelles | probabilites calibrees, aucune garantie publiee | **ensembles de prediction conformes** (couverture >= 1-alpha garantie) et **porte a risque controle** (erreur <= alpha a 1-delta, borne binomiale exacte) | `conformal.py` |
-| 3. Candidats illimites | 255 options | **rang de N candidats** par N nouls independants en une passe (elements d'une page, documents, outils) | `tools.py: judge_rank` |
+| 1. Latence | 70-500 ms via API (p50 mesure 422 ms) | llama.cpp local, estime et non mesure : 40-150 ms (S1 sur GPU), 100-350 ms + prefill d'un etat neuf (S1 sur CPU, RTX 5060) ; **torch en passe unique : cible < 50 ms** pour 10 questions sur 0,8B (une passe GPU, aucune requete HTTP) | `engine_torch.py` |
+| 2. Garanties formelles | probabilites calibrees, aucune garantie publiee | **ensembles de prediction conformes** (couverture >= 1-alpha garantie) et **porte a risque controle** (erreur <= alpha a 1-delta, borne binomiale exacte) | `conformal.py` (bibliotheque, branche nulle part) |
+| 3. Candidats illimites | 255 options | **rang de N candidats** par N nouls independants en une passe (elements d'une page, documents, outils) | `tools.py: judge_rank` (50 candidats au plus), `presets.rerank` |
 | 4. Le LLM consulte le decideur | produit isole | Bonsai appelle `judge_*` pendant qu'il raisonne / pilote le navigateur | `tools.py`, `computer_use.py` |
 | 5. Boucle fermee locale | modele fixe, cloud | Bonsai etiquette les cas douteux, le clone est re-entraine sur la distribution d'etats reelle (DAgger) | `distill.py`, `trajectory_to_examples` |
-| 6. Etat multimodal | non documente | images dans l'etat avec un clone VL (Qwen3.5-VL), captures pour Bonsai | `engine_torch.py` (a etendre), `computer_use.py --vision` |
+| 6. Etat multimodal | non documente | images dans l'etat avec un clone VL (Qwen3.5-VL), captures pour Bonsai | `engine_torch.py` (a etendre), `examples/browser_agent.py --vision` (pas dans Studio) |
 | 7. Cout / confidentialite | 0,042 $/M tokens, donnees chez TypeSafe | 0 $, rien ne sort de la machine | - |
 
 Axes 2, 4, 5 et la combinaison 1+3 n'existent pas dans l'offre Jev telle que documentee.

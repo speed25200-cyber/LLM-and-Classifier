@@ -18,9 +18,12 @@ classifieur ; rien ne quitte ensuite votre machine.
 Verifier le pilote : `nvidia-smi` (colonne "Driver Version"). Les scripts ci-dessous le verifient aussi et
 previennent si une RTX 50xx a un pilote trop ancien.
 
-## 1. Application de bureau (recommande)
+## 1. Application de bureau
 
-Page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases) du depot :
+Etat actuel : **aucune release publiee** (ni etiquette `v*`). Les seuls paquets construits sont les artefacts de
+l'execution #2 du workflow **Bureau** (commit `0194265`), anterieurs au cycle d'audit et de correctifs : ils embarquent
+l'ancien coeur. Pour le code a jour, preferer la methode 2, ou relancer le workflow Bureau a la main (Actions > Bureau >
+Run workflow). Une fois une release publiee, page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases) :
 
 * **Windows** : `Prophet Studio_<version>_x64-setup.exe` (installation pour l'utilisateur courant, sans droits
   administrateur) ou le `.msi`. Les installateurs ne sont pas signes : SmartScreen affiche un avertissement,
@@ -28,29 +31,36 @@ Page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases)
 * **Linux** : `.AppImage` (rendre executable puis lancer) ou `.deb` (`sudo apt install ./Prophet*.deb`).
 * **macOS (Apple Silicon)** : `.dmg` ; application non notarisee : clic droit > Ouvrir au premier lancement.
 
-Avant la premiere release, ou pour la toute derniere version : onglet **Actions** du depot, workflow **Bureau**,
-derniere execution reussie, section *Artifacts* (`prophet-studio-x86_64-pc-windows-msvc` contient le `.exe` et le
-`.msi`). Ces paquets sont reconstruits a chaque modification de l'application de bureau.
+Artefacts : onglet **Actions** du depot, workflow **Bureau**, derniere execution reussie, section *Artifacts*
+(`prophet-studio-x86_64-pc-windows-msvc` contient le `.exe` et le `.msi`). Le workflow ne se relance que si `desktop/`,
+`uv.lock` ou `.github/workflows/desktop.yml` changent : une modification de `jev_clone/` ou `prophet_studio/`, que les
+paquets embarquent, ne reconstruit rien.
 
 Le premier lancement prepare Python et les dependances (1 a 3 minutes, progression affichee), puis l'assistant
 prend le relais. Fermer la fenetre quitte Prophet Studio et libere la carte graphique.
 
 ## 2. En une commande (interface dans le navigateur)
 
+Tant que la branche `claude/local-llm-high-performance-q4wk6f` n'est pas fusionnee dans `main`, les URL `.../main/...`
+repondent 404 : prendre le script sur la branche et lui passer la meme reference.
+
 Windows, dans PowerShell (pas besoin de droits administrateur) :
 
 ```powershell
-irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/claude/local-llm-high-performance-q4wk6f/installer/install.ps1))) -Ref claude/local-llm-high-performance-q4wk6f
 ```
 
 Linux et macOS :
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/claude/local-llm-high-performance-q4wk6f/installer/install.sh | sh -s -- --ref claude/local-llm-high-performance-q4wk6f
 ```
 
+Apres la fusion : `irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.ps1 | iex`
+et `curl -fsSL https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.sh | sh`.
+
 Le script : verifie le systeme et le pilote NVIDIA, installe [uv](https://docs.astral.sh/uv/) s'il manque,
-telecharge le code (branche `main` par defaut), cree l'environnement Python 3.11
+telecharge le code (branche `main` par defaut, sinon `-Ref` / `--ref`), cree l'environnement Python 3.11
 (`uv sync --extra studio`), puis ajoute les lanceurs :
 
 * Windows : raccourcis **"Prophet Studio"** dans le menu Demarrer et sur le Bureau ; ils lancent le moteur
@@ -63,13 +73,13 @@ telecharge le code (branche `main` par defaut), cree l'environnement Python 3.11
 Options :
 
 ```powershell
-# Windows : parametres (version precise, sans raccourcis, depuis un depot clone...)
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/main/installer/install.ps1))) -Ref v0.2.0 -NoShortcut
+# Windows : parametres (branche ou etiquette precise, sans raccourcis, depuis un depot clone...)
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/speed25200-cyber/LLM-and-Classifier/claude/local-llm-high-performance-q4wk6f/installer/install.ps1))) -Ref claude/local-llm-high-performance-q4wk6f -NoShortcut
 powershell -ExecutionPolicy Bypass -File .\installer\install.ps1 -Source .
 ```
 
 ```bash
-curl -fsSL .../installer/install.sh | sh -s -- --ref v0.2.0 --no-shortcut
+curl -fsSL .../installer/install.sh | sh -s -- --ref claude/local-llm-high-performance-q4wk6f --no-shortcut
 ./installer/install.sh --source .          # depuis un depot clone
 ./installer/install.sh --help
 ```
@@ -78,7 +88,9 @@ Equivalents par variables d'environnement (utiles avec `irm | iex`) : `PROPHET_R
 `PROPHET_REPO`, `PROPHET_HOME`, `PROPHET_NO_SHORTCUT=1`.
 
 **Mettre a jour** : relancer la meme commande (le code est remplace, l'environnement Python mis a jour,
-les modeles et reglages conserves). Si le moteur tourne, le redemarrer ensuite.
+les modeles et reglages conserves). Si le moteur tourne, le redemarrer ensuite. La mise a jour lance
+`uv sync --extra studio`, qui retire les paquets hors de cet extra : un Playwright ajoute a la main pour le computer use
+est a reinstaller apres chaque mise a jour (docs/12, section 7).
 
 ## 3. Depuis les sources
 

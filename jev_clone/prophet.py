@@ -10,14 +10,14 @@ passe, a chaque tour, des *proprietes* de la demande :
   * un noul par outil du catalogue : les outils pertinents sont presentes en premier, les outils de base et
     les jugements restent toujours disponibles ; au-dela de `max_tools`, seuls les plus pertinents sont exposes
   * `intent`, `language` : etiquettes d'observation (journal, entrainement), jamais un aiguillage
-Pendant la boucle, Bonsai consulte le clone (`judge_*`) ; chaque commande, code, nouvel outil, appel de competence,
-navigation web ou ecriture de fichier (smart : toutes ; ask : celles qui peuvent s'executer) passe par le garde-fou
-du clone (risque d'outil, juge en entier par morceaux qui se chevauchent) et, si l'action est risquee ou le verdict
-incertain, par votre confirmation. Une commande montre au juge, au mieux, le code qu'elle lance (scripts passes a
-un interpreteur quel que soit leur suffixe, `python -m`, `-c`, `cd`, entree standard, hooks git) ; un script lance
-mais invisible (introuvable, reecrit par la commande) ou une commande qui vise `.prophet/skills` impose un arret
-humain. Toute autorisation « toujours » exclut les arrets obligatoires et les verdicts incertains. `.prophet/` n'est jamais
-ecrit par les outils de fichiers. Une voie directe ratee est reprise en voie agent. Tout tour est journalise.
+Pendant la boucle, Bonsai consulte le clone (`judge_*`) ; en modes smart et ask, chaque commande, code, nouvel outil,
+appel de competence, navigation web ou ecriture d'un fichier qui peut s'executer passe par le garde-fou du clone (risque
+d'outil, juge en entier par morceaux qui se chevauchent) et, si l'action est risquee ou le verdict incertain, par votre
+confirmation (mode auto : le clone n'est pas consulte). Une commande montre au juge, au mieux, le code qu'elle lance
+(scripts passes a un interpreteur quel que soit leur suffixe, `python -m`, `-c`, `cd`, entree standard, hooks git) ; un
+script lance mais invisible (introuvable, reecrit par la commande) ou une commande qui vise `.prophet/skills` impose un
+arret humain. Toute autorisation « toujours » exclut les arrets obligatoires et les verdicts incertains. `.prophet/`
+n'est jamais ecrit par les outils de fichiers. Une voie directe ratee est reprise en voie agent. Tout tour est journalise.
 """
 
 from __future__ import annotations
@@ -130,8 +130,8 @@ CLAIMS_ACTION = re.compile(_WRITE_VERB + _GAP + "(?:" + _FILE + "(?!" + _SHOWN +
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
 BUILTIN_TOOLS = ("write_file", "edit_file", "read_file", "list_files", "glob", "grep", "run_command", "python", "browse",
                  "remember", "create_tool", "done", "desktop")   # une competence ne les remplace jamais
-# fichiers dont le contenu s'execute (ecrits en mode ask : juges ; nommes par une commande : montres au juge). En mode
-# smart, toute ecriture est jugee : un .txt peut aussi finir execute (`python notes.txt`).
+# fichiers dont le contenu s'execute (ecrits en mode smart ou ask : juges ; nommes par une commande : montres au juge). Un
+# fichier de donnees n'est pas juge a l'ecriture : s'il finit execute (`python notes.txt`), la commande le montre au juge.
 EXEC_SUFFIXES = (".py", ".pyw", ".pth", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".fish", ".ksh", ".command",
                  ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".vbs", ".vbe", ".wsf", ".hta", ".rb", ".pl", ".php",
                  ".lua", ".r", ".jl", ".go", ".java", ".kts", ".groovy", ".tcl", ".mk", ".applescript", ".scpt")

@@ -55,8 +55,8 @@ reflexe n'est pas mesuree).
 
 Tests (sans modele) : l'agent complet sur une page locale (saisie, clic, `done`), l'escalade vers un Bonsai factice qui
 agit par outils, les portes, le garde-fou par pas, l'annulation, le DAgger (`tests/test_computer_use.py`,
-`tests/test_fix_computer_use_voice.py`, `tests/test_fix_r2_cu_ui.py`). Le passage contre un vrai `llama-server`
-(`tests/test_live_llamacpp.py`) est saute sans `JEV_TEST_SERVER`.
+`tests/test_fix_computer_use_voice.py`, `tests/test_fix_r2_cu_ui.py`, `tests/test_desktop_use.py`). Aucun test du computer
+use ne tourne contre un vrai `llama-server`.
 
 ```bash
 export JEV_S1_URL=http://127.0.0.1:8081 JEV_S2_URL=http://127.0.0.1:8080
@@ -70,8 +70,10 @@ suit la meme boucle, avec `press_keys` et `open_app` pour Bonsai.
 
 ## 3. Budget de latence (a mesurer)
 
-Classifieur sur GPU (RTX 4060, ou RTX 5060 en priorite vitesse) ; sur une RTX 5060 en equilibre, le classifieur est sur
-CPU (un slot) : ajouter le prefill CPU de chaque etat neuf (~0,5-1 s pour ~2 k tokens, estimation du planificateur).
+Colonne clone : classifieur sur GPU. Dans Studio, c'est le cas seulement en priorite vitesse (RTX 4060 comme RTX 5060) ;
+en priorites equilibre et contexte, le classifieur est sur CPU (un slot) : ajouter le prefill CPU de chaque etat neuf
+(~0,5-1 s pour ~2 k tokens, estimation du planificateur). Les profils shell `rtx4060-8gb-*` le mettent sur GPU
+(`JEV_NGL=99`).
 
 | Etape | Clone 0,8-1,7B (GPU) | Bonsai 2 27B PTQ1_0 |
 |---|---|---|

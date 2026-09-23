@@ -9,7 +9,7 @@ qui disparait a exactitude comparable.
 
 | Cas d'usage | Ce que fait le clone | Dans le depot |
 |---|---|---|
-| Routage de requete / de modele (economique, frontiere, humain) | `route` (choice) + `risk` (score) + porte de confiance | `presets.ROUTING`, `fusion.FusionRouter`, seuils de `calibrate.py` / `conformal.py` |
+| Routage de requete / de modele (economique, frontiere, humain) | `route` (choice) + `risk` (score) + porte de confiance | `presets.ROUTING`, `fusion.FusionRouter` (bibliotheque, `jev serve`), seuils de `calibrate.py` ; `conformal.py` existe mais n'est branche nulle part |
 | Choix de la competence / du sous-agent a charger | un `choice` sur le catalogue (jusqu'a 255) au lieu de tout mettre dans le contexte | `presets.skill_selection`, `tools.judge_choice` |
 | Reranking du contexte recupere | un `noul` par passage, tous en parallele, seuls les pertinents entrent dans la fenetre | `presets.rerank`, `tools.judge_rank` |
 | Garde-fous a chaque tour (injection, politique, contradiction, risque d'outil) | 4 nouls / choice en une passe avant d'executer | `presets.GUARDRAILS`, `computer_use.FastPolicy.verify`, `eval/jev_benchmark.py` |
