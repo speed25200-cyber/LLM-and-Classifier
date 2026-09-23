@@ -56,6 +56,9 @@ export function reduce(item: AssistantItem, evt: any): void {
     case "s1.tools":
       item.s1 = { ...(item.s1 ?? {}), tools: evt.relevance };
       break;
+    case "s1.reroute": // voie directe ecartee : les blocs deja la sont la premiere reponse, remplacee
+      item.reroute = { reason: evt.reason, verification: evt.verification ?? null, at: blocks.length };
+      break;
     case "turn.end":
       Object.assign(item, {
         path: evt.path,

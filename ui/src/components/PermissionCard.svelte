@@ -1,3 +1,17 @@
+<script module lang="ts">
+  export const TOOL_FR: Record<string, string> = { write_file: "ecrire un fichier", edit_file: "modifier un fichier", run_command: "executer une commande",
+    python: "executer du Python", create_tool: "creer un nouvel outil", browse: "naviguer sur le web", desktop: "piloter le bureau" };
+  export const RISK_FR: Record<string, string> = { readonly: "lecture seule", workspace_write: "ecriture locale", destructive: "destructif", privileged: "privilegie", exfiltration: "sortie de donnees" };
+
+  /** Autorisation memorisee : "run_command:readonly" -> "executer une commande · lecture seule" ; "write_file" -> action non jugee. */
+  export function grantLabel(g: string): string {
+    const i = g.indexOf(":");
+    const tool = i < 0 ? g : g.slice(0, i);
+    const cls = i < 0 ? "" : g.slice(i + 1);
+    return `${TOOL_FR[tool] ?? tool} · ${cls ? (RISK_FR[cls] ?? cls) : "sans jugement"}`;
+  }
+</script>
+
 <script lang="ts">
   import { ShieldAlert, ShieldCheck, ShieldX, Zap } from "@lucide/svelte";
   import type { Block } from "../lib/types";
@@ -9,14 +23,16 @@
   type Perm = Extract<Block, { type: "permission" }>;
   let { b }: { b: Perm } = $props();
 
-  const TOOL_FR: Record<string, string> = { write_file: "ecrire un fichier", edit_file: "modifier un fichier", run_command: "executer une commande",
-    python: "executer du Python", create_tool: "creer un nouvel outil", browse: "naviguer sur le web" };
-  const RISK_FR: Record<string, string> = { readonly: "lecture seule", destructive: "destructif", privileged: "privilegie", exfiltration: "sortie de donnees", workspace_write: "ecriture locale" };
   const j = $derived(b.judged ?? {});
   const pending = $derived(!b.decision);
+  // jugee par le clone ? (anciennes transcriptions : "workspace_write" sans s1_consulted etait une valeur de remplissage)
+  const judged = $derived(j.s1_consulted === true || (j.s1_consulted == null && !!j.tool_risk && j.tool_risk !== "workspace_write"));
+  // arret obligatoire (danger probable, politique, classifieur en panne, action vue en partie) : jamais de « toujours »
+  const hard = $derived(!!j.hard_stop);
+  const cls = $derived(typeof j.grant === "string" && j.grant.includes(":") ? j.grant.slice(j.grant.indexOf(":") + 1) : "");
 
   function decide(allow: boolean, remember = false) {
-    if (pending) app.respondPermission(b.id, allow, remember);
+    if (pending) app.respondPermission(b.id, allow, remember && !hard);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -26,7 +42,7 @@
     if (field && (field.tagName === "INPUT" || app.composerText.trim())) return;
     const k = e.key.toLowerCase();
     if (k === "y" || k === "o") (e.preventDefault(), decide(true));
-    else if (k === "a" || k === "t") (e.preventDefault(), decide(true, true));
+    else if ((k === "a" || k === "t") && !hard) (e.preventDefault(), decide(true, true));
     else if (k === "n" || k === "r") (e.preventDefault(), decide(false));
   }
 </script>
@@ -41,14 +57,19 @@
     <div class="t">
       <b>{pending ? "Autorisation requise" : b.decision === "allow" ? "Autorise" : "Refuse"} · {TOOL_FR[b.tool] ?? b.tool}</b>
       <div class="chips">
-        {#if j.tool_risk && j.tool_risk !== "workspace_write"}
+        {#if j.s1_error}
+          <span class="chip warn"><Zap size={11} /> classifieur indisponible : confirmation par prudence</span>
+        {:else if judged}
           <span class="chip s1"><Zap size={11} /> classifieur : {RISK_FR[j.tool_risk] ?? j.tool_risk}{j.tool_risk_conf != null ? ` (${pct(j.tool_risk_conf)} de certitude)` : ""}</span>
+          {#if j.p_risky != null && j.p_risky >= 0.2}<span class="chip {j.p_risky >= 0.35 ? 'warn' : ''}" title="Probabilite destructif + privilegie + sortie de donnees">danger {pct(j.p_risky)}</span>{/if}
           <span class="chip {j.risk >= 2 ? 'warn' : ''}">risque {num(j.risk ?? 0, 1)}/3</span>
           {#if j.policy_violation >= 0.3}<span class="chip warn">politique {pct(j.policy_violation)}</span>{/if}
+          {#if j.partial}<span class="chip warn">trop long pour etre juge en entier</span>{/if}
           {#if j.latency_ms}<span class="chip">juge en {num(j.latency_ms)} ms</span>{/if}
         {:else}
-          <span class="chip">mode « toujours demander »</span>
+          <span class="chip">non juge · mode « toujours demander »</span>
         {/if}
+        {#if hard && pending}<span class="chip warn" title="Ni « toujours » ni une autorisation memorisee ne s'appliquent">confirmation obligatoire</span>{/if}
       </div>
     </div>
   </div>
@@ -74,7 +95,11 @@
   {#if pending}
     <div class="acts">
       <button class="btn primary sm" onclick={() => decide(true)}>Autoriser <span class="kbd">Y</span></button>
-      <button class="btn sm" onclick={() => decide(true, true)}>Toujours pour cet outil <span class="kbd">A</span></button>
+      {#if !hard}
+        <button class="btn sm" onclick={() => decide(true, true)} title="Revocable dans le panneau Espace de travail">
+          Toujours pour cet outil{cls ? ` (${RISK_FR[cls] ?? cls})` : ""} <span class="kbd">A</span>
+        </button>
+      {/if}
       <button class="btn ghost sm danger" onclick={() => decide(false)}>Refuser <span class="kbd">N</span></button>
       <span class="hint faint">ou dites « accepte » / « refuse »</span>
     </div>

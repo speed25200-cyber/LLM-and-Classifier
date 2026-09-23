@@ -309,3 +309,15 @@ export interface VoiceRoute {
   source: string;
   ms: number;
 }
+
+// ---- garde-fou S1 et aiguillage (ajouts groupes) ----------------------------------------------------------------------
+/** Voie directe ecartee (reponse vide, tronquee, qui pretend avoir agi, NEEDS_TOOLS ou verification S1 trop basse) :
+ *  les `at` premiers blocs sont la premiere reponse, remplacee par la voie agent. */
+export interface RerouteInfo {
+  reason: string;
+  verification: number | null;
+  at: number;
+}
+export interface AssistantItem {
+  reroute?: RerouteInfo;
+}

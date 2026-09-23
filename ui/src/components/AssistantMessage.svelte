@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BadgeCheck, Copy, ListChecks, TriangleAlert, Volume2, Zap } from "@lucide/svelte";
+  import { BadgeCheck, Copy, CornerDownRight, ListChecks, TriangleAlert, Volume2, Zap } from "@lucide/svelte";
   import type { AssistantItem } from "../lib/types";
   import { responseAlreadyShown } from "../lib/transcript";
   import { ms, num, pct } from "../lib/format";
@@ -13,9 +13,15 @@
 
   let { item }: { item: AssistantItem } = $props();
   const live = $derived(item.status === "running");
-  const visible = $derived(item.blocks.filter((b) => !(b.type === "tool" && b.name === "done")));
+  // voie directe ecartee : les `at` premiers blocs sont la premiere reponse (attenuee), la voie agent suit
+  const cut = $derived(item.reroute?.at ?? 0);
+  const shown = $derived(item.blocks.map((b, idx) => ({ b, idx })).filter(({ b }) => !(b.type === "tool" && b.name === "done")));
+  const superseded = $derived(shown.filter((v) => v.idx < cut).map((v) => v.b));
+  const visible = $derived(shown.filter((v) => v.idx >= cut).map((v) => v.b));
   const showResponse = $derived(!!item.response && item.status !== "running" && !responseAlreadyShown(item));
   const lastIdx = $derived(visible.length - 1);
+  const REROUTE_FR: Record<string, string> = { low_verification: "verification du classifieur trop basse", empty: "reponse vide",
+    needs_tools: "Bonsai demande ses outils", truncated: "reponse tronquee", claims_action: "la reponse pretendait avoir agi sans outils" };
   const final = $derived(item.response || item.blocks.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("\n"));
   const nTools = $derived(item.blocks.filter((b) => b.type === "tool" && b.name !== "done").length);
   let copied = $state(false);
@@ -39,6 +45,17 @@
       <S1Strip s1={item.s1} />
     {:else if live}
       <div class="analysing"><Zap size={13} /> <span class="shimmer">Le classifieur analyse la demande…</span></div>
+    {/if}
+
+    {#if item.reroute}
+      {#if superseded.length}
+        <div class="superseded" title="Premiere reponse (voie directe), remplacee">
+          {#each superseded as b, i (`old-${b.type}-${i}`)}
+            {#if b.type === "text" && b.text.trim()}<div class="text"><Markdown text={b.text} /></div>{/if}
+          {/each}
+        </div>
+      {/if}
+      <div class="reroute"><CornerDownRight size={13} /> Reponse directe ecartee ({REROUTE_FR[item.reroute.reason] ?? item.reroute.reason}{item.reroute.verification != null ? ` · verifie ${pct(item.reroute.verification)}` : ""}) : reprise avec les outils.</div>
     {/if}
 
     {#each visible as b, i (b.type === "tool" || b.type === "permission" ? b.id : `${b.type}-${i}`)}
@@ -73,6 +90,7 @@
           </span>
         {/if}
         {#if item.stopped_by === "cancelled"}<span class="chip warn">interrompu</span>{/if}
+        {#if item.stopped_by === "length"}<span class="chip warn" title="Limite de tokens atteinte : la reponse est coupee">reponse tronquee</span>{/if}
         <span class="faint">{ms(item.latency_ms)}</span>
         {#if item.stats?.tok_s}<span class="faint">· {num(item.stats.tok_s, 1)} tok/s</span>{/if}
         {#if item.stats?.tokens}<span class="faint">· {num(item.stats.tokens)} tokens</span>{/if}
@@ -97,6 +115,8 @@
   .pending { color: var(--s2); }
   .pending .spinner { width: 12px; height: 12px; }
   .text { margin: 4px 0 10px; }
+  .superseded { opacity: 0.5; border-left: 2px solid var(--line-2); padding-left: 10px; margin-bottom: 6px; }
+  .reroute { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--s1); margin: 4px 0 10px; }
   .final { margin-top: 12px; padding: 14px 18px; border-radius: 14px; background: linear-gradient(180deg, color-mix(in srgb, var(--s2) 5%, var(--surface)), var(--surface)); border: 1px solid var(--line); }
   .error { display: flex; gap: 8px; align-items: center; color: var(--err); background: var(--err-soft); padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-top: 8px; }
   .meta { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; flex-wrap: wrap; }

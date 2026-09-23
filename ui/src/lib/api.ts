@@ -134,3 +134,10 @@ export async function onTauriEvent(name: string, cb: (payload: any) => void): Pr
   if (!isTauri) return;
   await window.__TAURI__.event.listen(name, (e: { payload: any }) => cb(e.payload));
 }
+
+// ---- autorisations memorisees (« toujours pour cet outil ») : "outil:classe de risque", ou "outil" si non jugee ----------
+export const alwaysAllow = {
+  list: (sid: string) => api<{ always_allow: string[] }>(`/api/sessions/${sid}/always_allow`),
+  revoke: (sid: string, grant?: string) =>
+    api<{ always_allow: string[] }>(`/api/sessions/${sid}/always_allow${grant ? `?grant=${encodeURIComponent(grant)}` : ""}`, { method: "DELETE" }),
+};

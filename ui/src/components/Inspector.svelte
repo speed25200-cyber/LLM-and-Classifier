@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { ChevronRight, ExternalLink, File, Folder, RefreshCw, X } from "@lucide/svelte";
+  import { ChevronRight, ExternalLink, File, Folder, RefreshCw, ShieldCheck, X } from "@lucide/svelte";
   import { app } from "../lib/store.svelte";
-  import { api } from "../lib/api";
+  import { alwaysAllow, api } from "../lib/api";
   import { highlight, langFromPath } from "../lib/markdown";
+  import { grantLabel } from "./PermissionCard.svelte";
 
   interface Node { name: string; path: string; dir: boolean; children: Node[] }
   let entries = $state<string[]>([]);
@@ -58,6 +59,38 @@
   });
 
   const lines = $derived(content != null ? highlight(content, langFromPath(app.inspectorFile ?? "")).split("\n") : []);
+
+  // autorisations memorisees (« toujours pour cet outil ») de la session : visibles et revocables
+  let grants = $state<string[]>([]);
+  const decided = $derived(app.lastAssistant?.blocks.filter((b) => b.type === "permission" && b.decision).length ?? 0);
+
+  async function loadGrants() {
+    const sid = app.session?.id;
+    if (!sid) return void (grants = []);
+    try {
+      grants = (await alwaysAllow.list(sid)).always_allow;
+    } catch {
+      grants = [];
+    }
+  }
+
+  async function revoke(grant?: string) {
+    const s = app.session;
+    if (!s) return;
+    try {
+      grants = (await alwaysAllow.revoke(s.id, grant)).always_allow;
+      s.always_allow = grants;
+    } catch (e) {
+      app.toast("error", "Revocation impossible", String(e));
+    }
+  }
+
+  $effect(() => {
+    void app.session?.id;
+    void decided;
+    void app.running;
+    loadGrants();
+  });
 </script>
 
 {#snippet branch(nodes: Node[], depth: number)}
@@ -96,6 +129,20 @@
       </div>
     </div>
   {/if}
+  {#if grants.length}
+    <div class="grants">
+      <div class="gh">
+        <span class="panel-title"><ShieldCheck size={12} /> Autorisations memorisees</span>
+        {#if grants.length > 1}<button class="btn ghost sm" onclick={() => revoke()}>Tout revoquer</button>{/if}
+      </div>
+      {#each grants as g (g)}
+        <div class="grant">
+          <span class="gl" title={g}>{grantLabel(g)}</span>
+          <button class="icon-btn" title="Revoquer : redemander a chaque fois" aria-label="Revoquer {grantLabel(g)}" onclick={() => revoke(g)}><X size={13} /></button>
+        </div>
+      {/each}
+    </div>
+  {/if}
   <div class="foot faint mono" title={root}>{root}</div>
 </aside>
 
@@ -122,5 +169,11 @@
   .no { text-align: right; padding-right: 12px; color: var(--text-4); user-select: none; }
   .c { white-space: pre; padding-right: 16px; }
   .pad { padding: 10px 14px; }
+  .grants { border-top: 1px solid var(--line); padding: 6px 6px 6px 14px; max-height: 160px; overflow-y: auto; }
+  .gh { display: flex; align-items: center; justify-content: space-between; min-height: 26px; }
+  .gh .panel-title { display: inline-flex; align-items: center; gap: 6px; }
+  .grant { display: flex; align-items: center; gap: 6px; height: 27px; font-size: 12px; color: var(--text-2); }
+  .gl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grant .icon-btn { width: 24px; height: 24px; }
   .foot { font-size: 10.5px; padding: 6px 14px; border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
