@@ -1,0 +1,76 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Prophet Studio",
+  "version": "0.2.0",
+  "identifier": "ai.prophet.studio",
+  "build": {
+    "frontendDist": "../../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval' blob:",
+        "style-src": "'self' 'unsafe-inline'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*",
+        "img-src": "'self' data: blob: http://127.0.0.1:*",
+        "media-src": "'self' data: blob: mediastream: http://127.0.0.1:*",
+        "font-src": "'self' data:",
+        "worker-src": "'self' blob:",
+        "frame-src": "'self' http://127.0.0.1:* http://localhost:*"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Prophet Studio",
+    "homepage": "https://github.com/speed25200-cyber/LLM-and-Classifier",
+    "copyright": "Apache-2.0",
+    "license": "Apache-2.0",
+    "category": "Productivity",
+    "shortDescription": "Bonsai 2 27B + classifieur calibre, en local",
+    "longDescription": "Prophet Studio fait tourner en local un agent a deux vitesses : un classifieur calibre (System One) et Bonsai 2 27B (System Two) servi par llama.cpp, pense pour une carte graphique de 8 Go.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/prophet-uv"],
+    "resources": {
+      "../../pyproject.toml": "core/pyproject.toml",
+      "../../uv.lock": "core/uv.lock",
+      "../../README.md": "core/README.md",
+      "../../jev_clone": "core/jev_clone",
+      "../../prophet_studio": "core/prophet_studio"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["French", "English"]
+      },
+      "wix": {
+        "language": "fr-FR"
+      }
+    },
+    "linux": {
+      "deb": {
+        "recommends": ["gstreamer1.0-plugins-good", "gstreamer1.0-pulseaudio"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist"
+    }
+  }
+}

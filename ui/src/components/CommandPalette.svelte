@@ -69,7 +69,7 @@
 {/if}
 
 <style>
-  .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(4, 5, 8, 0.55); display: flex; justify-content: center; padding-top: 14vh; }
+  .scrim { position: fixed; inset: var(--titlebar-h) 0 0 0; z-index: 50; background: rgba(4, 5, 8, 0.55); display: flex; justify-content: center; padding-top: 14vh; }
   .pal { width: min(640px, 92vw); max-height: 60vh; display: flex; flex-direction: column; border-radius: 18px; background: var(--surface-2); box-shadow: var(--shadow-3); overflow: hidden; }
   .in { display: flex; align-items: center; gap: 12px; padding: 0 18px; height: 56px; border-bottom: 1px solid var(--line); color: var(--text-3); }
   .in input { flex: 1; background: none; border: 0; outline: none; font-size: 16px; color: var(--text); }

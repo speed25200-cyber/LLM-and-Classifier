@@ -152,7 +152,8 @@
 </div>
 
 <style>
-  .wiz { position: fixed; inset: 0; z-index: 70; background: rgba(4, 5, 8, 0.72); display: grid; place-items: center; padding: 24px; }
+  /* sous la barre de titre : fenetre deplacable, reduisible et fermable pendant l'accueil */
+  .wiz { position: fixed; inset: var(--titlebar-h) 0 0 0; z-index: 70; background: rgba(4, 5, 8, 0.72); display: grid; place-items: center; padding: 24px; }
   .panel { width: min(980px, 100%); height: min(640px, 100%); display: grid; grid-template-columns: 230px 1fr; border-radius: 24px; background: var(--surface); box-shadow: var(--shadow-3); overflow: hidden; }
   .steps { background: var(--bg-2); border-right: 1px solid var(--line); padding: 22px 16px; display: flex; flex-direction: column; gap: 4px; }
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 14px; margin: 0 6px 22px; }

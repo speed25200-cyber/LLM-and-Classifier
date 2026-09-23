@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Fusionne par Tauri dans Contents/Info.plist (macOS). -->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Prophet Studio utilise le micro pour les commandes vocales (push-to-talk). Le son est traite localement et ne quitte pas cet ordinateur.</string>
+</dict>
+</plist>

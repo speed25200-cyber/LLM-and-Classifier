@@ -1,0 +1,21 @@
+{
+  "name": "prophet-studio-desktop",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Prophet Studio : coquille de bureau Tauri 2 (fenetre, barre d'etat, raccourci global, superviseur du coeur Python)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "sidecar": "node scripts/fetch-uv.mjs",
+    "icons": "node scripts/render-icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

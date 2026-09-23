@@ -1,0 +1,118 @@
+# Integration continue : coeur Python (Linux + Windows), interface Svelte, coquille de bureau Tauri.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Dependances (studio + dev)
+        run: uv sync --extra studio --extra dev --python 3.11
+
+      # Chromium pour les tests pilotes par Playwright (interface, computer use) ; sans lui ils sont sautes.
+      - name: Navigateur Playwright (Linux)
+        if: runner.os == 'Linux'
+        run: uv run --no-sync playwright install --with-deps chromium
+
+      - name: Tests (faux llama-server, sans GPU)
+        run: uv run --no-sync pytest -q
+        env:
+          PROPHET_HOME: ${{ runner.temp }}/prophet-home
+
+  ui:
+    name: Interface (Svelte)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+      # `npm run build` recopie ui/dist dans prophet_studio/web (servi par le coeur, utilise par les
+      # installateurs) : on signale sans bloquer une copie versionnee qui n'est plus a jour.
+      - name: prophet_studio/web a jour ?
+        working-directory: .
+        run: |
+          if [ -n "$(git status --porcelain -- prophet_studio/web)" ]; then
+            git status --short -- prophet_studio/web
+            echo "::warning title=Interface a reconstruire::prophet_studio/web ne correspond pas a ui/ : lancer 'npm run build' dans ui/ et commiter prophet_studio/web."
+          fi
+
+  desktop-check:
+    name: Bureau (Tauri, cargo)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Dependances systeme (WebKitGTK, GTK, barre d'etat)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential pkg-config
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      # tauri::generate_context! embarque ui/dist : il doit exister a la compilation.
+      - name: Interface (ui/dist)
+        run: npm ci --prefix ui && npm run build --prefix ui
+
+      # externalBin exige binaries/prophet-uv-<cible> ; un fichier vide suffit pour compiler.
+      - name: Espace reserve pour le sidecar uv
+        run: node desktop/scripts/fetch-uv.mjs --placeholder
+
+      - name: cargo fmt
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: cargo check + clippy
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: desktop/src-tauri
+        run: cargo test --locked

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Prophet Studio : deux arcs concentriques.
+       Arc interieur (ambre) = System One, le classifieur rapide ; arc exterieur (vert-cyan) = System Two, Bonsai 2 27B.
+       Les ouvertures opposees evoquent le passage de relais entre les deux systemes ; le point central = la decision.
+       Regenerer les icones : cd desktop && npm run icons -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171C25"/>
+      <stop offset="1" stop-color="#07080B"/>
+    </linearGradient>
+    <linearGradient id="s2" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#10B981"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="s1" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#FCD34D"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#bg)"/>
+  <rect x="65.5" y="65.5" width="893" height="893" rx="206.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="3"/>
+  <path d="M 459.9 807.4 A 300 300 0 1 0 216.6 564.1" fill="none" stroke="url(#s2)" stroke-width="72" stroke-linecap="round"/>
+  <path d="M 526.4 347.6 A 165 165 0 1 0 676.4 497.6" fill="none" stroke="url(#s1)" stroke-width="72" stroke-linecap="round"/>
+  <circle cx="512" cy="512" r="52" fill="#F5EFE6"/>
+</svg>

@@ -14,3 +14,6 @@ eval/results/
 third_party/
 node_modules/
 desktop/src-tauri/target/
+# application de bureau : sidecar uv telecharge (npm run sidecar) et schemas generes par tauri-build
+desktop/src-tauri/binaries/
+desktop/src-tauri/gen/
