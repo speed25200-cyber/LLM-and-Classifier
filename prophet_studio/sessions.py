@@ -18,7 +18,7 @@ from jev_clone.engine import SystemOneEngine
 from jev_clone.desktop_use import make_desktop_factory
 from jev_clone.guard import grant_for
 from jev_clone.prophet import Prophet, Workspace, make_browser_factory
-from jev_clone.readout import Calibration
+from prophet_studio import calibration as s1cal
 
 
 def new_id() -> str:
@@ -39,7 +39,8 @@ def reduce_event(item: dict, evt: dict) -> None:
         kind = "thinking" if t == "thinking.delta" else "text"
         if kind == "text":
             _close_thinking(blocks, ts)
-        if blocks and blocks[-1]["type"] == kind:
+        # jamais fusionne par-dessus une voie directe ecartee : la voie agent commence un bloc a elle
+        if blocks and blocks[-1]["type"] == kind and len(blocks) > (item.get("reroute") or {}).get("at", 0):
             blocks[-1]["text"] += evt.get("text", "")
         else:
             blocks.append({"type": kind, "text": evt.get("text", ""), **({"started": ts} if kind == "thinking" else {})})
@@ -60,12 +61,16 @@ def reduce_event(item: dict, evt: dict) -> None:
         for b in blocks:
             if b["type"] == "permission" and b["id"] == evt["id"]:
                 b["decision"] = "allow" if evt.get("allow") else "deny"
-    elif t == "s1.decision":
-        item["s1"] = {k: evt.get(k) for k in ("pre", "latency_ms", "budget", "risk_level", "path")}
+    elif t == "s1.decision":   # calibrated / s1_model : l'etat du classifieur pour CE tour (pas celui du moment de l'affichage)
+        item["s1"] = {k: evt.get(k) for k in ("pre", "latency_ms", "budget", "risk_level", "path", "calibrated", "s1_model", "gates")}
     elif t == "s1.tools":
         item.setdefault("s1", {})["tools"] = evt.get("relevance")
     elif t == "s1.reroute":   # la voie directe est ecartee : les blocs deja la sont la premiere reponse, remplacee
-        item["reroute"] = {"reason": evt.get("reason"), "verification": evt.get("verification"), "at": len(blocks)}
+        item["reroute"] = {"reason": evt.get("reason"), "verification": evt.get("verification"), "budget": evt.get("budget"), "at": len(blocks)}
+        s1 = item.setdefault("s1", {})   # voie et budget reels du tour ; la decision de S1 reste dans rerouted_from
+        s1.update(rerouted_from=s1.get("path"), path=evt.get("to") or "agent")
+        if evt.get("budget") is not None:
+            s1["budget"] = evt["budget"]
     elif t == "turn.end":
         item.update({k: evt.get(k) for k in ("path", "response", "verification", "latency_ms", "stopped_by", "stats")})
         item["status"] = "done"
@@ -153,25 +158,34 @@ class AgentService:
         c = self.calibration() if callable(self.calibration) else self.calibration
         return str(c) if c and Path(c).is_file() else None
 
+    def s1_model(self) -> str | None:
+        """Classifieur en marche (nom de son fichier de calibration, meme absent) ; None en mode mono ou sans rappel."""
+        c = self.calibration() if callable(self.calibration) else None
+        return Path(c).stem if c else None
+
     def invalidate_engines(self) -> None:
         self._engines = None
 
+    @staticmethod
+    def _stamp(p) -> tuple | None:
+        try:
+            st = Path(p).stat()
+            return st.st_size, st.st_mtime_ns
+        except (OSError, TypeError):
+            return None
+
     def engines(self) -> tuple[SystemOneEngine, LlamaCppBackend]:
         s1_url, s2_url = self.urls()
-        cal = self.calibration_path()
-        try:
-            stamp = Path(cal).stat().st_mtime_ns if cal else None
-        except OSError:
-            stamp = None
-        key = (s1_url, s2_url, cal, stamp)       # autre classifieur, calibration ajoutee / remplacee : moteur reconstruit
-        if self._engines is None or self._engines[2] != key:
-            try:
-                calibration = Calibration.load(cal)
-            except Exception:                    # fichier illisible (signale dans l'etat) : lecture brute plutot qu'une panne
-                calibration = Calibration()
-            s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=120), calibration=calibration, model_name="systemone")
+        cal, model = self.calibration_path(), self.s1_model()
+        # autre classifieur, calibration ajoutee / remplacee, GGUF calibre remplace sur place : moteur reconstruit
+        key = (s1_url, s2_url, model, cal, self._stamp(cal))
+        e = self._engines
+        if e is None or e[2] != key or (e[3] is not None and self._stamp(e[3]) != e[4]):
+            calibration, _why, w = s1cal.load_for_engine(cal)   # illisible, perimee, generique : lecture brute (dit dans l'etat)
+            # nom du classifieur en marche, porte par chaque decision de tour ("" en mode mono : Bonsai repond)
+            s1 = SystemOneEngine(LlamaCppBackend(s1_url, max_workers=4, timeout=120), calibration=calibration, model_name=model or "")
             s2 = LlamaCppBackend(s2_url, max_workers=1, timeout=900)
-            self._engines = (s1, s2, key)
+            self._engines = (s1, s2, key, w, self._stamp(w))
         return self._engines[0], self._engines[1]
 
     # ---- tours -----------------------------------------------------------------------------------------------------

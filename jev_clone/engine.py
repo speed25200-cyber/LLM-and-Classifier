@@ -41,7 +41,8 @@ class SystemOneEngine:
         answers = {}
         for qid, q in req.questions.items():
             kind = q.type
-            key_probs = merge_branches(kind, per_q[qid], self.cal)
+            # temperature de la question calibree (meme question, etat de meme forme), T = 1 pour toute autre
+            key_probs = merge_branches(kind, per_q[qid], self.cal, qid, q, req.state)
             answers[qid] = to_answer(kind, key_probs, q)
 
         prompt_tokens = sum(r.prompt_tokens for r in results)

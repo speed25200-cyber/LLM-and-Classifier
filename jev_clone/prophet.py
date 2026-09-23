@@ -27,6 +27,7 @@ import base64
 import difflib
 import fnmatch
 import json
+import math
 import os
 import platform
 import re
@@ -42,6 +43,7 @@ from typing import Callable
 
 from jev_clone.guard import judge_state
 from jev_clone.presets import with_meta
+from jev_clone.readout import Calibration
 from jev_clone.tools import AgentLoop, SystemOneToolbox, _tool
 
 INTENTS = {"chat": "conversation or question", "create_app": "create an application, script, site or project", "modify_code": "change existing files",
@@ -75,10 +77,24 @@ in this reply, so never claim to have created, read, changed or run anything.
 If a correct answer really needs files, commands, the web or several steps of work, reply with exactly NEEDS_TOOLS and nothing else.
 {memory}"""
 NEEDS_TOOLS = "NEEDS_TOOLS"
-# une reponse directe qui pretend avoir agi (sans outils, c'est faux) ou dit ne pas avoir acces : la voie agent s'impose
-CLAIMS_ACTION = re.compile(r"\bi(?:'ve| have)? (?:just )?(?:created|written|saved|updated|modified|edited|deleted|installed|executed|ran)\b"
-                           r"|\bj'ai (?:bien )?(?:cr[eé][eé]|[eé]crit|enregistr[eé]|modifi[eé]|mis [aà] jour|supprim[eé]|install[eé]|ex[eé]cut[eé]|lanc[eé])"
-                           r"|\b(?:i (?:don't|do not|can't|cannot) (?:have )?access|je n'ai pas acc[eè]s|je ne peux pas acc[eé]der)"
+# NEEDS_TOOLS n'importe ou dans la reponse, meme entoure de markdown (`NEEDS_TOOLS`, **NEEDS_TOOLS**, NEEDS\_TOOLS)
+NEEDS_TOOLS_RX = re.compile(r"(?<![A-Za-z0-9])NEEDS\\?_TOOLS(?![A-Za-z0-9])", re.IGNORECASE)
+# une reponse directe qui pretend avoir agi (sans outils, c'est faux) ou dit ne pas avoir acces : la voie agent s'impose.
+# Un verbe d'ecriture ne compte qu'avec un objet du disque dans la meme proposition (poeme ecrit, texte modifie, liste mise
+# a jour : reponses normales) ; un verbe d'execution compte toujours. Apostrophes droites et typographiques.
+_A = "['\\u2019\\u2018\\u02bc]"   # ' et apostrophes typographiques (classe de regex : echappements lus par re)
+_FS_OBJ = (r"(?:(?<![\w\-./\\])(?!(?:node|vue|next|nuxt|express|three|chart|react|d3|p5)\.js\b)[\w\-./\\]*\w\.[a-z][a-z0-9]{0,4}\b"
+           r"|\b(?:files?|fichiers?|folders?|dossiers?|director(?:y|ies)|r[eé]pertoires?|disk|disque|workspace|espace de travail)\b)")
+_WRITE_VERB = (rf"(?:\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:created|written|wrote|saved|updated|modified|edited|deleted|removed|added|generated)\b"
+               rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:cr[eé][eé]|[eé]crit|enregistr[eé]|modifi[eé]|mis [aà] jour|supprim[eé]|ajout[eé]|g[eé]n[eé]r[eé])(?!\w))")
+_RUN_OBJ = r"(?:it|this|that|(?:your|the) (?:code|script|command|program|tests?|server|app|function))\b"
+_EXEC_VERB = (rf"\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:executed|installed|launched)\b|\bi (?:ran|tested|started) {_RUN_OBJ}"
+              rf"|\bi(?:{_A}ve| have) (?:just |now |already |also )?(?:run|tested|started) {_RUN_OBJ}"
+              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:ex[eé]cut[eé]|install[eé])(?!\w)"
+              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:lanc[eé]|test[eé]|d[eé]marr[eé]) (?:ton|ta|tes|votre|vos|le|la|les|ce|cette|ces) "
+              r"(?:code|script|programme|commande|serveur|tests?|application|appli|app)\b")
+CLAIMS_ACTION = re.compile(_WRITE_VERB + r"[^\n.!?:;]{0,40}?" + _FS_OBJ + "|" + _EXEC_VERB
+                           + rf"|\b(?:i (?:don{_A}t|do not|can{_A}t|cannot|can not) (?:have )?access|je n{_A}ai pas acc[eè]s|je ne peux pas acc[eé]der)"
                            r"|<tool_call>|\"name\":\s*\"(?:write_file|edit_file|run_command|python|done)\"", re.IGNORECASE)
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
 BUILTIN_TOOLS = ("write_file", "edit_file", "read_file", "list_files", "glob", "grep", "run_command", "python", "browse",
@@ -945,10 +961,45 @@ class Prophet:
         pre["tool_relevance"] = {n: round(r.answers[f"t_{n}"].noul, 3) for n in ranked}
         return keep + [c for c in CORE_TOOLS if c in catalog]
 
-    def _budget(self, pre: dict, effort: str) -> tuple[int, int]:
-        risk_level = int(round(pre["risk"]["score"]))
+    def _gates(self, state: dict) -> dict:
+        """Seuils des portes du pre-tour : ceux de la calibration du S1 pour les questions qu'elle couvre (meme echelle que
+        les lectures, apres temperature), absents sinon (valeurs par defaut) ; inf = ne jamais se fier a cette lecture."""
+        cal = getattr(self.s1, "cal", None)
+        if not isinstance(cal, Calibration):
+            return {}
+        return {q: thr for q in ("direct", "needs_reasoning", "risk") if (thr := cal.gate(q, PROPHET_TURN[q], state)) is not None}
+
+    def _calibrated(self, state: dict) -> bool:
+        """Une temperature ou un seuil calibre s'applique-t-il au pre-tour de ce tour ?"""
+        cal = getattr(self.s1, "cal", None)
+        if not isinstance(cal, Calibration):
+            return False
+        if cal.generic:
+            return cal.is_active()
+        return any(cal.entry(q, PROPHET_TURN[q], state) is not None for q in PROPHET_TURN)
+
+    @staticmethod
+    def _needs_reasoning(pre: dict, gates: dict) -> bool:
+        """Sans reflexion seulement si S1 le dit, et avec assez d'assurance quand la question est calibree."""
+        nr = pre["needs_reasoning"]["noul"]
+        return nr >= 0.5 or (1.0 - nr) < gates.get("needs_reasoning", 0.0)
+
+    @staticmethod
+    def _risk(pre: dict, gates: dict) -> tuple[int, bool]:
+        """-> (niveau, lecture sure). Sans calibration du risque : niveau attendu arrondi. Calibre : niveau le plus probable
+        (la temperature ne le deplace pas) ; sous le seuil calibre, la lecture n'est pas sure : pas de voie directe et un
+        peu de reflexion, sans gonfler le niveau affiche."""
+        probs = pre["risk"].get("probabilities")
+        if "risk" not in gates or not probs:
+            return int(round(pre["risk"]["score"])), True
+        lvl, top = max(((int(k), float(v)) for k, v in probs.items()), key=lambda kv: (kv[1], kv[0]))
+        return lvl, top >= gates["risk"]
+
+    def _budget(self, pre: dict, effort: str, gates: dict | None = None) -> tuple[int, int]:
+        gates = gates or {}
+        risk_level, sure = self._risk(pre, gates)
         budget = self.budgets[min(risk_level, len(self.budgets) - 1)]
-        if pre["needs_reasoning"]["noul"] >= 0.5:
+        if self._needs_reasoning(pre, gates) or not sure:
             budget = max(budget, self.budgets[1])
         if effort == "fast":
             budget = 0
@@ -993,7 +1044,7 @@ class Prophet:
         text = turn.response
         if not text:
             return "empty"
-        if text.lstrip().upper().startswith(NEEDS_TOOLS):
+        if NEEDS_TOOLS_RX.search(text):   # le marqueur n'a aucun sens pour l'utilisateur : ou qu'il soit, la reponse est inutilisable
             return "needs_tools"
         if turn.stopped_by == "length":
             return "truncated"
@@ -1014,23 +1065,29 @@ class Prophet:
         # le classifieur lit ~2 k tokens par slot (4 slots sur 8 k) : on borne ce qu'on lui montre
         recent = [{"role": m.get("role"), "content": _clip(m.get("content"), 400)} for m in history[-4:]]
         s1_ms = 0.0
+        state = {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent}
         try:
-            pre_resp = self._s1({"state": {"request": _clip(request, 2500), "workspace_files": files[:60], "recent_turns": recent},
-                                 "questions": PROPHET_TURN})
+            pre_resp = self._s1({"state": state, "questions": PROPHET_TURN})
             pre = {k: v.model_dump(exclude={"legend"}) for k, v in pre_resp.answers.items()}
             s1_ms = pre_resp.latency_ms
         except Exception as e:   # le clone accelere et protege, il n'est jamais un point de panne : Bonsai continue seul
             pre = {"direct": {"noul": 0.0}, "clarify": {"noul": 0.0}, "needs_reasoning": {"noul": 1.0}, "risk": {"score": 1.0},
                    "s1_error": str(e)[:200]}
-        budget, risk_level = self._budget(pre, effort)
-        direct = (pre["direct"]["noul"] >= 0.8 and pre["needs_reasoning"]["noul"] < 0.5 and risk_level == 0 and effort != "deep"
-                  and not self.plan_mode)
+        # portes lues sur l'echelle des lectures : seuils calibres pour les questions calibrees, sinon 0.8 / 0.5 / E[risque]
+        gates = {} if "s1_error" in pre else self._gates(state)
+        budget, risk_level = self._budget(pre, effort, gates)
+        direct = (pre["direct"]["noul"] >= max(0.5, gates.get("direct", 0.8)) and not self._needs_reasoning(pre, gates)
+                  and risk_level == 0 and self._risk(pre, gates)[1] and effort != "deep" and not self.plan_mode)
+        # etat de la calibration pour CE tour (l'interface ne le deduit pas du classifieur en marche au moment de l'affichage)
         self._emit({"type": "s1.decision", "pre": pre, "latency_ms": s1_ms, "budget": budget, "risk_level": risk_level,
-                    "path": "direct" if direct else "agent"})
+                    "path": "direct" if direct else "agent", "calibrated": "s1_error" not in pre and self._calibrated(state),
+                    "s1_model": getattr(self.s1, "model_name", None) or None,
+                    "gates": {k: (None if math.isinf(v) else round(v, 4)) for k, v in gates.items()}})
         memory = self.ws.memory()
         memory_note = ("\nWhat you remember about the user:\n- " + "\n- ".join(memory)) if memory else ""
         calls: list[dict] = []
         stats: dict = {"s1_ms": 0.0, "llm_calls": 0, "tokens": 0, "tok_s": None, "prompt_ms": 0.0}
+        tool_s1 = (0.0, 0)
 
         def track(evt: dict) -> None:
             if evt.get("type") == "llm.end":
@@ -1049,10 +1106,11 @@ class Prophet:
         if turn is not None:
             reason = self._reroute_reason(request, turn)
             if reason:   # le clone s'est trompe de voie : Bonsai reprend le tour avec les outils (l'interface le montre)
-                pre["rerouted"] = {"reason": reason, "verification": turn.verification}
-                self._emit({"type": "s1.reroute", "reason": reason, "verification": turn.verification, "from": "direct", "to": "agent"})
                 if effort != "fast":
                     budget = self._cap(max(budget, self.budgets[1]))
+                pre["rerouted"] = {"reason": reason, "verification": turn.verification, "budget": budget}   # budget reel (journal)
+                self._emit({"type": "s1.reroute", "reason": reason, "verification": turn.verification, "from": "direct", "to": "agent",
+                            "budget": budget})
                 turn = None
         if turn is None:
             system = SYSTEM_PROMPT.format(workspace=self.ws.root, platform=f"{platform.system()} {platform.release()}", shell=SHELL_NAME,
@@ -1074,13 +1132,22 @@ class Prophet:
             # -> souvent un aller-retour d'outil de moins, soit plusieurs secondes sur un 27B
             hint += ("\n(Workspace: " + ", ".join(files[:40]) + (f", ... {len(files) - 40} more" if len(files) > 40 else "") + ")") if files else "\n(Workspace is empty.)"
             res = loop.run([{"role": "system", "content": system}, *history[-6:], {"role": "user", "content": f"{request}\n\n{hint}"}])
+            for s in res.steps:   # lectures S1 faites par les outils browse / desktop (politique rapide, garde par pas...)
+                for c in s.tool_calls:
+                    r = c.get("result")
+                    if c["name"] in ("browse", "desktop") and isinstance(r, dict):
+                        try:
+                            tool_s1 = (tool_s1[0] + float(r.get("s1_ms") or 0), tool_s1[1] + int(r.get("s1_calls") or 0))
+                        except (TypeError, ValueError):
+                            pass
             summary = next((c["result"].get("summary") for s in reversed(res.steps) for c in s.tool_calls if c["name"] == "done" and isinstance(c["result"], dict)), None)
             turn = Turn(request, pre, "agent", summary or (res.content or "").strip() or "(no summary)", tool_calls=calls, tools_exposed=exposed,
                         stopped_by=res.stopped_by)
             if turn.stopped_by != "cancelled":
                 turn.verification = self._verify(request, turn.response)
         turn.latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        stats["s1_ms"], stats["s1_calls"] = round(self._s1_ms, 1), self._s1_calls   # toutes les lectures S1 du tour
+        # toutes les lectures S1 du tour : celles de Prophet et celles des outils browse / desktop
+        stats["s1_ms"], stats["s1_calls"] = round(self._s1_ms + tool_s1[0], 1), self._s1_calls + tool_s1[1]
         turn.stats = stats
         self._emit({"type": "turn.end", "path": turn.path, "response": turn.response, "verification": turn.verification,
                     "latency_ms": turn.latency_ms, "stopped_by": turn.stopped_by, "stats": stats, "tools_exposed": turn.tools_exposed})

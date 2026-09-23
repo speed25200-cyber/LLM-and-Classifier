@@ -180,9 +180,10 @@ def test_agent_service_loads_calibration_of_the_running_s1_only(tmp_path):
     svc = AgentService(SessionStore(tmp_path / "s"), lambda e: None, urls=lambda: ("http://127.0.0.1:1", "http://127.0.0.1:2"),
                        settings=lambda: None, ctx=lambda: 8192, calibration=lambda: s1cal.calibration_file(runs, running["model"]))
     assert svc.engines()[0].cal.t("choice") == 1.0                     # pas encore calibre
-    s1cal.store(runs, "ternary-4b", Calibration(temperature={"choice": 3.0}))
+    # questions ajustees connues (seuils) : une temperature seule, generique, n'est plus appliquee par Studio (test_fix_r2_decisions)
+    s1cal.store(runs, "ternary-4b", Calibration(temperature={"choice": 3.0}, thresholds={"intent": None}))
     assert svc.engines()[0].cal.t("choice") == 1.0                     # la calibration d'un autre S1 n'est jamais appliquee
-    s1cal.store(runs, "ternary-1.7b", Calibration(temperature={"choice": 2.0}))
+    s1cal.store(runs, "ternary-1.7b", Calibration(temperature={"choice": 2.0}, thresholds={"intent": None}))
     assert svc.engines()[0].cal.t("choice") == 2.0                     # cache invalide a l'ecriture
     running["model"] = "ternary-4b"
     assert svc.engines()[0].cal.t("choice") == 3.0

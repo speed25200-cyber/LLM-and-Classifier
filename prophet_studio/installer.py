@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,16 @@ from prophet_studio.downloads import DownloadJob, Downloader, free_disk_gb
 from prophet_studio.hardware import GPU
 
 EXE = ".exe" if sys.platform == "win32" else ""
+MAX_CUSTOM_ID = 100   # < 128 (calibration.SAFE_ID) : un GGUF importe peut toujours etre calibre
+
+
+def custom_id(role: str, stem: str) -> str:
+    """Id d'un GGUF importe : stable pour un meme nom de fichier (re-import = meme entree), borne en longueur (au-dela,
+    debut du nom + empreinte courte), jamais vide."""
+    slug = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+    h = hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8]
+    mid = f"custom-{role}-{slug or h}"
+    return mid if len(mid) <= MAX_CUSTOM_ID else f"{mid[:MAX_CUSTOM_ID - 9].rstrip('-')}-{h}"
 
 
 # ---- choix de l'asset runtime -----------------------------------------------------------------------------------------
@@ -212,7 +223,8 @@ class Installer:
                                "size_gb": CUSTOM[mid].size_gb if mid in CUSTOM else None}
         rt = self.registry.get("runtime")
         return {"models": models, "runtime": rt if (rt and self.server_binary()) else None,
-                "calibration": s1cal.status(self.paths.runs),     # calibration du classifieur, par id de modele
+                # calibration du classifieur, par id de modele ; perimee si le GGUF enregistre n'est plus celui calibre
+                "calibration": s1cal.status(self.paths.runs, self.model_path),
                 "custom_server": bool(self.settings.get().llama_server_path),
                 "voice": {vid: (vid in self.registry["voice"]) for vid in VOICE}, "free_disk_gb": round(free_disk_gb(self.paths.root), 1)}
 
@@ -266,7 +278,7 @@ class Installer:
             raise FileNotFoundError(f"GGUF introuvable : {p}")
         if role not in ("s1", "s2"):
             raise ValueError(f"role inconnu : {role!r} (s1 = classifieur, s2 = cerveau)")
-        mid = f"custom-{role}-{re.sub(r'[^a-z0-9]+', '-', p.stem.lower()).strip('-')}"
+        mid = custom_id(role, p.stem)
         with self._lock:
             s1cal.forget(self.paths.runs, mid)   # nouveaux poids sous le meme id : l'ancienne calibration ne s'applique plus
             self.registry["models"][mid] = {"main": str(p), "role": role, "label": label or p.stem, "installed_at": time.time(), "custom": True}

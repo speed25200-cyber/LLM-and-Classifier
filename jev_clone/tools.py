@@ -15,12 +15,21 @@ la reponse finale ou `max_turns`. Toute la trajectoire est journalisee.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from jev_clone.schema import SystemOneRequest
+
+
+def _recover_path(raw) -> dict:
+    """Arguments d'un appel coupe : seul le chemin, s'il est lisible (affichage, historique en JSON valide)."""
+    m = re.search(r'"path"\s*:\s*"([^"\\\n]{1,300})"', raw) if isinstance(raw, str) else None
+    if m:
+        return {"path": m.group(1)}
+    return {"path": raw["path"]} if isinstance(raw, dict) and isinstance(raw.get("path"), str) else {}
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -202,7 +211,8 @@ class AgentLoop:
     def run(self, messages: list[dict], thinking_budget: int | None = None) -> AgentResult:
         msgs = list(messages)
         steps: list[AgentStep] = []
-        budget = self.thinking_budget if thinking_budget is None else thinking_budget
+        budget = base_budget = self.thinking_budget if thinking_budget is None else thinking_budget
+        cut_steps = 0          # reponses coupees par max_tokens au milieu d'un appel d'outil, de suite
         stopped = "max_turns"
         for turn in range(self.max_turns):
             if self.should_stop():
@@ -238,20 +248,42 @@ class AgentLoop:
             calls = msg.get("tool_calls") or []
             if resp.get("cancelled"):
                 calls = []
+            # arguments illisibles, ou dernier appel d'une reponse coupee par max_tokens (arguments incomplets, meme si le
+            # serveur a referme le JSON) : l'appel n'est pas execute, et l'historique recoit un JSON valide (sinon
+            # llama-server refuse la requete suivante)
+            parsed, bad = [], []
+            for k, tc in enumerate(calls):
+                raw = (tc.get("function") or {}).get("arguments")
+                try:
+                    args = json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
+                    why = None if isinstance(args, dict) else "arguments are not a JSON object"
+                except json.JSONDecodeError as e:
+                    args, why = {}, f"arguments are not valid JSON ({e.msg})"
+                if finish == "length" and k == len(calls) - 1:
+                    why = "cut"
+                if why:
+                    shown = _recover_path(raw)
+                    tc = {**tc, "function": {**(tc.get("function") or {}), "arguments": json.dumps(shown)}}
+                    args = shown
+                parsed.append((tc, args, why))
+                bad.append(why)
+            calls = [tc for tc, _, _ in parsed]
             assistant = {"role": "assistant", "content": msg.get("content") or ""}
             if calls:
                 assistant["tool_calls"] = calls
             msgs.append(assistant)
             stop = False
-            for k, tc in enumerate(calls):
+            for k, (tc, args, why) in enumerate(parsed):
                 fn = tc.get("function", {})
                 name = fn.get("name", "")
                 cid = tc.get("id") or f"call_{turn}_{k}"
-                try:
-                    args = json.loads(fn.get("arguments") or "{}") if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
-                except json.JSONDecodeError:
-                    args = {}
-                if self.should_stop():
+                if why:
+                    self._emit({"type": "tool.call", "id": cid, "name": name, "args": self._preview_args(args)})
+                    result = {"ok": False, "truncated": why == "cut", "error": (
+                        f"your reply was cut by the output limit (max_tokens={self.max_tokens}) before the arguments of {name} were "
+                        "complete: nothing was executed. Think briefly and split large content: write_file with a first part, then "
+                        "edit_file to add the rest." if why == "cut" else f"{why}: nothing was executed; call {name} again with valid JSON.")}
+                elif self.should_stop():
                     result = {"ok": False, "error": "cancelled by the user"}
                 else:
                     self._emit({"type": "tool.call", "id": cid, "name": name, "args": self._preview_args(args)})
@@ -276,6 +308,16 @@ class AgentLoop:
                 stopped = "stop_tool"; break
             if not calls:   # coupee par max_tokens : reponse tronquee, pas une fin propre
                 stopped = "length" if finish == "length" else "final"; break
+            if "cut" in bad:
+                cut_steps += 1
+                if cut_steps >= 2:   # deux reponses coupees de suite : on s'arrete et on le dit (pas 24 generations pour rien)
+                    step.content = (f"[reponse tronquee : un appel d'outil a depasse la limite de sortie (max_tokens={self.max_tokens}) "
+                                    "deux fois de suite et n'a pas ete execute. Demandez un fichier plus court, ou en plusieurs parties.]")
+                    stopped = "length"; break
+                # nouvel essai : moins de reflexion, de la place pour l'appel
+                budget = self.max_tokens // 5 if budget is None else min(budget, self.max_tokens // 5)
+            else:
+                cut_steps, budget = 0, base_budget
         res = AgentResult(content=steps[-1].content if steps else None, steps=steps, messages=msgs, stopped_by=stopped)
         self._log(res)
         return res
