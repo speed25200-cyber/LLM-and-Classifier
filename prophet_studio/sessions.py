@@ -188,6 +188,9 @@ class AgentService:
         self.permissions: dict[str, PendingPermission] = {}
         self._engines: tuple | None = None
         self._lock = threading.Lock()
+        # evenements de tour : reduits et publies sous ce verrou, dans l'ordre de leur numero (tseq) ; snapshot() y copie le
+        # tour en cours, pour qu'une interface rechargee reprenne exactement la ou la copie s'arrete
+        self._live = threading.Lock()
         self.runs_dir = runs_dir
         self.desktop_backend = desktop_backend   # None = Windows UI Automation ; la demo passe un bureau simule
 
@@ -246,9 +249,11 @@ class AgentService:
         self.store.save(session)
 
         def emit(evt: dict) -> None:
-            evt = {**evt, "session_id": sid, "turn_id": turn_id, "ts": round(time.time(), 3)}
-            reduce_event(item, evt)
-            self.publish(evt)
+            with self._live:
+                evt = {**evt, "session_id": sid, "turn_id": turn_id, "ts": round(time.time(), 3), "tseq": item.get("tseq", 0) + 1}
+                reduce_event(item, evt)
+                item["tseq"] = evt["tseq"]
+                self.publish(evt)
 
         def confirm(describe: str, judged: dict) -> bool:
             tool = judged.get("tool", "action")
@@ -326,8 +331,9 @@ class AgentService:
         return True
 
     def respond(self, perm_id: str, allow: bool, remember: bool = False) -> bool:
-        pp = self.permissions.get(perm_id)
-        if not pp:
+        # retrait atomique : la premiere reponse fait foi (double clic, 2e fenetre, voix + clavier) ; apres Stop, expiree
+        pp = self.permissions.pop(perm_id, None)
+        if not pp or pp.event.is_set():
             return False
         pp.allow, pp.remember = allow, remember
         pp.event.set()
@@ -335,6 +341,15 @@ class AgentService:
 
     def pending_permissions(self) -> list[dict]:
         return [{"id": p.id, "session_id": p.session_id, "tool": p.tool} for p in self.permissions.values()]
+
+    def snapshot(self, sid: str) -> dict | None:
+        """Copie de la session d'un tour en cours (blocs deja recus, demande d'autorisation en attente), None sinon. Le dernier
+        element porte tseq : l'interface n'applique ensuite que les evenements plus recents (rechargement, changement de session)."""
+        r = self.running.get(sid)
+        if r is None:
+            return None
+        with self._live:
+            return {**json.loads(json.dumps(r["session"], ensure_ascii=False, default=str)), "running": True}
 
     # ---- autorisations memorisees (« toujours pour cet outil ») : visibles et revocables --------------------------------
     def always_allow(self, sid: str) -> list[str]:

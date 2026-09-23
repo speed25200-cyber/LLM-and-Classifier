@@ -43,7 +43,7 @@
     {/if}
     {#if rt?.restarting}
       <span class="it warn" title={rt.message}><span class="spinner"></span> redemarrage {rt.restarting === "s1" ? "du classifieur" : "de Bonsai"}</span>
-    {:else if rt?.mono}
+    {:else if rt?.mono && (rt.state === "ready" || rt.state === "degraded")}
       <span class="it warn" title={rt.message || "Bonsai repond aussi aux decisions System One"}>mode mono</span>
     {/if}
     {#if relaunches && !rt?.restarting}

@@ -60,6 +60,8 @@ export interface Plan {
   notes: string[];
   rung: number;
   title: string;
+  ram_short?: boolean;                                  // RAM insuffisante (tout backend) : jamais lance sans accord
+  ram?: { needed_mib: number; total_mib: number } | null; // RAM demandee (poids hors GPU, classifieur sur CPU)
 }
 
 export interface ServerInfo {
@@ -200,7 +202,7 @@ export type Block =
       id: string;
       tool: string;
       describe: string;
-      preview: { diff?: string; command?: string; code?: string; old?: string; new?: string } | null;
+      preview: { diff?: string; command?: string; code?: string; old?: string; new?: string; action?: string } | null;
       judged: Record<string, any> | null;
       decision: "allow" | "deny" | null;
     };
@@ -230,6 +232,7 @@ export interface AssistantItem {
   error?: string;
   plan_mode?: boolean;
   pending_tool?: string | null;
+  tseq?: number;          // numero du dernier evenement applique (copie vivante d'un tour en cours : les suivants seulement)
 }
 
 export interface UserItem {

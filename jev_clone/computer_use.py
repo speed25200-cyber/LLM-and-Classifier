@@ -121,6 +121,32 @@ class _Metered:
         return getattr(self.inner, k)
 
 
+class S2Meter:
+    """Appels de Bonsai pendant un run (tours de SlowPolicy) : rendus par browse / desktop (s2_calls, s2_tokens,
+    s2_prompt_ms) pour que les statistiques du tour comptent aussi la generation faite dans l'outil."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.reset()
+
+    def reset(self) -> None:
+        self.calls, self.tokens, self.prompt_ms = 0, 0, 0.0
+
+    def chat(self, *a, **kw):
+        resp = self.inner.chat(*a, **kw)
+        tm = (resp.get("timings") if isinstance(resp, dict) else None) or {}
+        self.calls += 1
+        self.tokens += int(tm.get("predicted_n") or 0)
+        self.prompt_ms += float(tm.get("prompt_ms") or 0.0)
+        return resp
+
+    def stats(self) -> dict:
+        return {"s2_calls": self.calls, "s2_tokens": self.tokens, "s2_prompt_ms": round(self.prompt_ms, 1)}
+
+    def __getattr__(self, k):
+        return getattr(self.inner, k)
+
+
 def _playwright_dirs() -> list[Path]:
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
     if env == "0":   # navigateurs installes dans le paquet lui-meme
@@ -395,6 +421,33 @@ def describe_action(action: dict, state: PageState | None) -> str:
     return str(t)
 
 
+ROLE_FR = {"button": "bouton", "a": "lien", "link": "lien", "input": "champ", "textbox": "champ", "searchbox": "recherche",
+           "textarea": "zone de texte", "document": "document", "menuitem": "menu", "checkbox": "case", "radio": "option",
+           "tab": "onglet", "listitem": "element de liste", "combobox": "liste", "select": "liste", "option": "option"}
+
+
+def describe_action_fr(action: dict, state: PageState | None) -> str:
+    """describe_action en francais, pour la demande d'autorisation d'un pas (le juge et Bonsai lisent la version anglaise)."""
+    t = action.get("type")
+    el = ""
+    if "target" in action:
+        i = _as_int(action["target"])
+        e = state.elements[i] if state is not None and i is not None and 0 <= i < len(state.elements) else None
+        role = e.role.split(":")[0] if e else ""
+        el = (f"[{i}] {ROLE_FR.get(role, role)} « {e.name[:60]} »" + (f" (vers {e.href[:60]})" if e.href else "") if e
+              else f"[{action['target']}] (element inconnu)")
+    if t == "click":
+        return f"cliquer sur {el}"
+    if t == "type":
+        txt = str(action.get("text", ""))
+        return f"saisir « {txt[:300]}{'…' if len(txt) > 300 else ''} » dans {el}" + (" puis Entree" if action.get("submit") else "")
+    if t == "press_keys":
+        return f"raccourci clavier {str(action.get('keys', ''))[:80]}"
+    if t == "open_app":
+        return f"ouvrir l'application ou le fichier {str(action.get('name', ''))[:200]}"
+    return str(t)
+
+
 class StepGuard:
     """Garde-fou par pas : le clone juge chaque clic, saisie, raccourci ou lancement d'application AVANT execution
     (~100 ms, memes questions que le juge des outils de Prophet). Pas risque : confirmation humaine via `confirm`
@@ -426,8 +479,9 @@ class StepGuard:
         if self.confirm is None:
             return {"allowed": False, "judged": j,
                     "reason": "risky step refused: nobody can approve it here; find a safer way or call done with achieved=false and explain why"}
-        try:
-            ok = bool(self.confirm(f"{self.kind} step: {j['describe']}", {**j, "tool": f"{self.kind}_step", "preview": {"command": j["describe"]}}))
+        try:   # apercu : action en francais (affichee, jamais comme une commande shell) ; command = texte juge (anciens clients)
+            ok = bool(self.confirm(f"{self.kind} step: {j['describe']}", {**j, "tool": f"{self.kind}_step",
+                                                                         "preview": {"action": describe_action_fr(action, state), "command": j["describe"]}}))
         except Exception:
             ok = False
         return {"allowed": ok, "judged": j, "confirm_called": True, **({} if ok else {"reason": "the user declined this step"})}
@@ -437,7 +491,8 @@ class SlowPolicy:
     """System Two : Bonsai planifie avec des outils d'action + les outils de jugement du clone. Quand l'agent l'attache
     (attach), chaque clic / saisie passe par le garde-fou du pas et la boucle de Bonsai suit l'annulation (generation
     diffusee : Stop ferme la connexion). Reflexion plafonnee a thinking_share de max_tokens. `done` dit si l'objectif est
-    atteint (achieved) : un pas refuse suivi de done n'est jamais un succes."""
+    atteint (achieved) ; apres un pas refuse, achieved=true ne vaut que si le clone le confirme sur une observation neuve
+    (ComputerUseAgent._escalate). Ses appels sont comptes (meter) pour les statistiques du tour."""
 
     def __init__(self, s2_backend, session: BrowserSession, toolbox: SystemOneToolbox | None = None,
                  thinking_budget: int = 2048, max_turns: int = 6, vision: bool = False, max_tokens: int = 2048,
@@ -471,7 +526,8 @@ class SlowPolicy:
                                    "or a needed step was refused (say why in the summary).",
                            {"summary": {"type": "string"}, "achieved": {"type": "boolean"}}, ["summary", "achieved"]), done),
         }
-        self.loop = AgentLoop(s2_backend, toolbox, tools, max_turns=max_turns, max_tokens=max_tokens,
+        self.meter = S2Meter(s2_backend)
+        self.loop = AgentLoop(self.meter, toolbox, tools, max_turns=max_turns, max_tokens=max_tokens,
                               thinking_budget=_thinking_cap(thinking_budget, max_tokens, thinking_share))
 
     def attach(self, guard: StepGuard | None = None, should_stop: Callable[[], bool] | None = None,
@@ -526,8 +582,9 @@ class ComputerUseAgent:
     pas risque est refuse et signale. on_event(evt) : un evenement `computer.step` par pas (voie rapide ou escalade,
     probabilite, raison), `computer.escalate` au depart d'une escalade, `computer.think` a chaque tour de Bonsai et
     `computer.action` par action de Bonsai. should_stop() : annulation cooperative, transmise a la boucle de Bonsai.
-    Escalades plafonnees (max_escalations) ; un Bonsai en panne (erreur, ou reponse coupee par max_tokens) arrete la
-    boucle apres max_s2_errors echecs consecutifs. Une erreur du clone n'arrete jamais la tache : le pas part a Bonsai."""
+    Escalades plafonnees (max_escalations) ; un Bonsai en panne (erreur, ou reponse coupee par max_tokens sans avoir change
+    l'ecran) arrete la boucle apres max_s2_errors echecs consecutifs. Une erreur du clone n'arrete jamais la tache : le pas
+    part a Bonsai."""
 
     def __init__(self, session: BrowserSession, fast: FastPolicy, slow: SlowPolicy | None = None,
                  max_steps: int = 30, verify: bool = True, verify_threshold: float = 0.4,
@@ -575,18 +632,47 @@ class ComputerUseAgent:
         out = self.slow.step(goal, state, history, slots, why)
         rec["slow"] = out
         history.extend(out["actions"])
-        # erreur, ou reponse coupee par max_tokens sans action : un echec de Bonsai, pas une escalade de plus a bruler
-        self.s2_errors = self.s2_errors + 1 if out["stopped_by"] in ("error", "length") else 0
+        blocked = any(a.get("blocked") for a in out["actions"])
+        # erreur, ou reponse coupee par max_tokens sans rien changer a l'ecran : un echec de Bonsai. Coupee apres des actions
+        # qui ont change l'ecran : ni echec ni remise a zero (un Bonsai qui avance mais se coupe reste borne par les escalades)
+        if out["stopped_by"] == "error" or (out["stopped_by"] == "length" and not self._progressed(state, out["actions"])):
+            self.s2_errors += 1
+        elif out["stopped_by"] != "length":
+            self.s2_errors = 0
         if out["stopped_by"] == "stop_tool":   # done : un succes seulement si Bonsai declare l'objectif atteint
             d = next((a for a in reversed(out["actions"]) if a.get("type") == "done"), {})
+            # apres un pas refuse, achieved=true ne se croit pas sur parole : le clone relit l'ecran (~100 ms)
+            if d.get("achieved", True) and blocked and not self._confirm_achieved(goal, history, slots, rec):
+                d["achieved"], d["unconfirmed"] = False, True   # meme objet que l'historique et le journal (DAgger)
             if d.get("achieved", True):
                 return "done"
-            return "blocked" if any(a.get("blocked") for a in out["actions"]) else "not_achieved"
+            return "blocked" if blocked else "not_achieved"
         if out["stopped_by"] == "cancelled" or self.should_stop():
             return "cancelled"
         if self.s2_errors >= self.max_s2_errors:
             return "s2_error"
         return None
+
+    def _progressed(self, state: PageState, actions: list[dict]) -> bool:
+        """Une reprise coupee a-t-elle avance ? Une action executee (ni refusee, ni done) ET un ecran different."""
+        if not any(a.get("type") != "done" and not a.get("blocked") for a in actions):
+            return False
+        try:
+            return self.session.observe().text() != state.text()
+        except Exception:
+            return False
+
+    def _confirm_achieved(self, goal: str, history: list[dict], slots: dict[str, str], rec: dict) -> bool:
+        """done(achieved=true) apres un pas refuse : le noul "objectif atteint" du clone sur l'ecran actuel, au seuil de la
+        voie rapide. Clone indisponible : prudence, pas de succes declare."""
+        try:
+            st = self.fast.state_for(goal, self.session.observe(), history, slots)
+            p = float(self.fast.engine.answer({"state": st, "questions": {"achieved": ACHIEVED_Q}}).answers["achieved"].noul)
+        except Exception as e:
+            rec["done_check_error"] = str(e)[:200]
+            return False
+        rec["done_check"] = round(p, 4)
+        return p >= self.fast.done_threshold
 
     def run(self, goal: str, url: str | None = None, slots: dict[str, str] | None = None) -> dict:
         slots = slots or {}
@@ -597,6 +683,8 @@ class ComputerUseAgent:
         status, fails = "max_steps", 0
         self.escalations = self.s2_errors = 0
         self.s1.ms, self.s1.calls = 0.0, 0
+        if self.slow is not None:
+            self.slow.meter.reset()
         for step in range(self.max_steps):
             if self.should_stop():
                 status = "cancelled"; break
@@ -662,7 +750,9 @@ class ComputerUseAgent:
         summary = next((a.get("summary") for a in reversed(history) if a.get("type") == "done"), None)
         return {"status": status, "steps": len(records), "history": history, "records": records, "escalations": self.escalations,
                 "fast_steps": sum(1 for r in records if r.get("path") == "fast"), "summary": summary,
-                "blocked": [a for a in history if a.get("blocked")], "s1_ms": round(self.s1.ms, 1), "s1_calls": self.s1.calls}
+                "blocked": [a for a in history if a.get("blocked")], "s1_ms": round(self.s1.ms, 1), "s1_calls": self.s1.calls,
+                "unconfirmed": any(a.get("unconfirmed") for a in history),
+                **(self.slow.meter.stats() if self.slow is not None else {"s2_calls": 0, "s2_tokens": 0, "s2_prompt_ms": 0.0})}
 
     def _log(self, goal, status, records):
         if not self.ledger:
@@ -675,11 +765,17 @@ class ComputerUseAgent:
 
 def run_result(out: dict) -> dict:
     """Resultat compact rendu a Bonsai par les outils browse / desktop. ok : objectif atteint (jamais apres un pas refuse
-    suivi d'un done non atteint). s1_ms / s1_calls : lectures du clone pendant le run, pour les statistiques du tour."""
+    suivi d'un done non atteint ou non confirme par le clone). s1_ms / s1_calls : lectures du clone ; s2_calls / s2_tokens /
+    s2_prompt_ms : generation de Bonsai dans l'outil ; les deux pour les statistiques du tour."""
     r = {"ok": out["status"] == "done", "status": out["status"], "steps": out["steps"], "fast_steps": out.get("fast_steps", 0),
-         "escalations": out.get("escalations", 0), "s1_ms": float(out.get("s1_ms") or 0.0), "s1_calls": int(out.get("s1_calls") or 0)}
+         "escalations": out.get("escalations", 0), "s1_ms": float(out.get("s1_ms") or 0.0), "s1_calls": int(out.get("s1_calls") or 0),
+         "s2_calls": int(out.get("s2_calls") or 0), "s2_tokens": int(out.get("s2_tokens") or 0),
+         "s2_prompt_ms": float(out.get("s2_prompt_ms") or 0.0)}
     if out.get("summary"):
         r["summary"] = out["summary"]
+    if out.get("unconfirmed"):
+        r["note"] = ("done(achieved=true) was not accepted: a step was declined and the screen does not show the goal achieved; "
+                     "the summary above is a claim, not the result")
     if out.get("blocked"):
         r["blocked_steps"] = [{k: v for k, v in a.items() if k != "text"} for a in out["blocked"][:5]]
     return r
@@ -722,7 +818,8 @@ def trajectory_to_examples(traj: dict) -> list[dict]:
     sur l'etat que Bonsai a vu (`slow_state` quand il reprend apres une action rapide). Les pas rapides verifies avec
     succes sont gardes aussi (auto-etiquetage, poids a moderer a l'entrainement). Une action refusee par le garde-fou
     n'est jamais une etiquette, et l'exemple d'un pas qui en contient une est marque `declined`. Un done non atteint
-    (impossible, pas refuse) s'etiquette "escalate" : jamais done / objectif atteint sur un etat inacheve."""
+    (impossible, pas refuse) s'etiquette "escalate", comme tout done d'un pas qui contient un refus (meme achieved=true :
+    Bonsai a conclu sur l'etat d'avant le refus) : jamais done / objectif atteint sur un etat inacheve."""
     out = []
     for rec in traj.get("records", []):
         if rec.get("path", "").startswith("escalated"):
@@ -737,8 +834,8 @@ def trajectory_to_examples(traj: dict) -> list[dict]:
                 slot = _slot_of(str(a.get("text", "")), st.get("available_slots") or {})
                 if slot is None:   # texte libre : la politique rapide ne sait pas l'ecrire, la bonne decision est d'escalader
                     action = "escalate"
-            elif action == "done":   # anciens journaux sans "achieved" : atteint seulement si rien n'a ete refuse
-                achieved = _flag(a.get("achieved"), not declined)
+            elif action == "done":   # jamais atteint dans un pas qui contient un refus (anciens journaux compris)
+                achieved = _flag(a.get("achieved"), True) and not declined
                 action = "done" if achieved else "escalate"
             target = _as_int(a.get("target")) if action in ("click", "type") else None
             ex = decision_example(st, action, target, slot, achieved, "bonsai")

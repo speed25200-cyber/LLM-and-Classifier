@@ -4,7 +4,7 @@
   import { app } from "../lib/store.svelte";
   import { api } from "../lib/api";
   import { highlight, langFromPath } from "../lib/markdown";
-  import { cuPath, cuStatus, ms, pct } from "../lib/format";
+  import { cuPath, cuStatus, cuWhy, ms, num, pct } from "../lib/format";
   import { parseUnifiedDiff } from "../lib/diff";
   import DiffView from "./DiffView.svelte";
 
@@ -64,7 +64,7 @@
     <span class="ic" class:s1={judge}><meta.icon size={14} /></span>
     <span class="verb">{meta.verb}</span>
     <span class="target mono">{target}</span>
-    {#if live}<span class="live tabnum" title={cu?.live?.why ?? ""}>{live}</span>{/if}
+    {#if live}<span class="live tabnum" title={cuWhy(cu?.live?.why)}>{live}</span>{/if}
     <span class="right">
       {#if cu?.escalations}<span class="chip tabnum" title="Pas confies a Bonsai">{cu.escalations} escalade{cu.escalations > 1 ? "s" : ""}</span>{/if}
       {#if stats && (stats.added || stats.removed)}
@@ -83,8 +83,12 @@
         <div class="errbox">{r.error}</div>
       {:else if r.blocked}
         <div class="note">{r.reason ?? "Action bloquee."}</div>
-      {:else if (b.name === "write_file" || b.name === "edit_file") && b.ui?.diff}
-        <DiffView diff={b.ui.diff} />
+      {:else if (b.name === "write_file" || b.name === "edit_file") && b.ui && "diff" in b.ui}
+        {#if b.ui.diff}
+          <DiffView diff={b.ui.diff} />
+        {:else}
+          <div class="note">{b.ui.created ? "Fichier vide cree." : "Contenu identique au fichier existant : aucune modification."}</div>
+        {/if}
         <div class="foot">
           {#if /\.(html?|svg|pdf|png|jpe?g)$/i.test(a.path ?? "")}
             <button class="btn ghost sm" onclick={() => api("/api/open", { body: { path: a.path, session: app.session?.id } })}>Ouvrir</button>
@@ -132,6 +136,7 @@
             · {r.steps ?? 0} pas{r.fast_steps != null ? ` dont ${r.fast_steps} decides par le classifieur` : ""}{r.escalations ? ` · ${r.escalations} escalade${r.escalations > 1 ? "s" : ""}` : ""}
             · <b class="st" class:bad={r.ok === false}>{cuStatus(r.status)}</b>
             {#if r.s1_calls}<span class="faint"> · classifieur : {r.s1_calls} lecture{r.s1_calls > 1 ? "s" : ""}, {ms(r.s1_ms)}</span>{/if}
+            {#if r.s2_calls}<span class="faint"> · Bonsai : {r.s2_calls} appel{r.s2_calls > 1 ? "s" : ""}{r.s2_tokens ? `, ${num(r.s2_tokens)} tokens` : ""}</span>{/if}
           </div>
           {#if r.summary}<div class="note sum">{r.summary}</div>{/if}
           {#if r.blocked_steps?.length}
@@ -149,7 +154,7 @@
                 {:else}
                   <span class="mono act">{s.action ?? "—"}</span>{#if s.p != null}<b class="tabnum">{pct(s.p)}</b>{/if}
                 {/if}
-                {#if s.why && s.path !== "fast"}<span class="why" title={s.why}>{s.why}</span>{/if}
+                {#if s.why && s.path !== "fast"}<span class="why" title={cuWhy(s.why)}>{cuWhy(s.why)}</span>{/if}
               </li>
             {/each}
           </ol>

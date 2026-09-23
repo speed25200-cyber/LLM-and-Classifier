@@ -2,7 +2,7 @@
 import { api, ApiError, bootFromPage, bootFromTauri, connectEvents, isTauri } from "./api";
 import { newAssistant, reduce } from "./transcript";
 import type { AssistantItem, CoreState, DownloadJob, Effort, GpuMetrics, PermissionMode, Session, Settings, VoiceRoute } from "./types";
-import { fixed } from "./format";
+import { fixed, frText, num } from "./format";
 
 export type View = "chat" | "models" | "settings";
 export interface Toast {
@@ -122,7 +122,7 @@ class AppState {
         const first = !this.core;
         this.applyState(e.state);
         if (first && !this.session && e.state.sessions.length) this.openSession(e.state.sessions[0].id);
-        if (this.session) this.openSession(this.session.id, true);
+        if (this.session) this.loadSession(this.session.id, true);   // reconnexion : on relit la session sans changer d'ecran
         return;
       }
       case "runtime.status": {
@@ -161,7 +161,7 @@ class AppState {
         const j: DownloadJob = e.job;
         const prev = this.downloads[j.id];
         this.downloads[j.id] = j;
-        if (j.status === "error" && prev?.status !== "error") this.toast("error", `Echec : ${j.label}`, j.error);
+        if (j.status === "error" && prev?.status !== "error") this.toast("error", `Echec : ${j.label}`, frText(j.error));
         return;
       }
       case "install.changed":
@@ -183,22 +183,30 @@ class AppState {
         return;
       case "turn.queued":
         if (this.core && !this.core.running.includes(e.session_id)) this.core.running = [...this.core.running, e.session_id];
+        this.refreshSessions();   // titre (1er message) et ordre de la barre laterale, deja enregistres par le coeur
         return;
       case "turn.finished":
         if (this.core) this.core.running = this.core.running.filter((s) => s !== e.session_id);
         this.refreshSessions();
+        // evenements perdus (connexion coupee, file pleine) : la copie sur disque est complete a ce stade
+        if (e.session_id === this.session?.id && this.lastAssistant?.status === "running") this.loadSession(e.session_id, true);
         return;
     }
-    if (e.session_id && this.session && e.session_id === this.session.id && e.turn_id) {
-      let item = this.session.transcript.find((i) => i.kind === "assistant" && i.turn_id === e.turn_id) as AssistantItem | undefined;
-      if (!item) {
-        this.session.transcript.push(newAssistant(e.turn_id));
-        item = this.session.transcript[this.session.transcript.length - 1] as AssistantItem;
-      }
-      reduce(item, e);
-      if (e.type === "turn.end") this.onTurnEnd?.(item);
-      if (e.type === "tool.result" && ["write_file", "edit_file", "python", "run_command"].includes(e.name)) this.filesVersion++;
+    const op = this.opening;
+    if (op && e.session_id === op.id && e.turn_id) op.buf.push(e);
+    if (e.session_id && this.session && e.session_id === this.session.id && e.turn_id) this.applyTurnEvent(e);
+  }
+
+  private applyTurnEvent(e: any) {
+    const s = this.session!;
+    let item = s.transcript.find((i) => i.kind === "assistant" && i.turn_id === e.turn_id) as AssistantItem | undefined;
+    if (!item) {
+      s.transcript.push(newAssistant(e.turn_id));
+      item = s.transcript[s.transcript.length - 1] as AssistantItem;
     }
+    if (!reduce(item, e)) return;   // deja dans la copie vivante
+    if (e.type === "turn.end") this.onTurnEnd?.(item);
+    if (e.type === "tool.result" && ["write_file", "edit_file", "python", "run_command"].includes(e.name)) this.filesVersion++;
   }
 
   // ---- notifications ---------------------------------------------------------------------------------------------------
@@ -219,13 +227,37 @@ class AppState {
   }
 
   async openSession(id: string, quiet = false) {
-    try {
-      const s = await api<Session>(`/api/sessions/${id}`);
-      this.session = s;
+    if (await this.loadSession(id, quiet)) {
       this.view = "chat";
       this.planMode = false;
+    }
+  }
+
+  /** Relit une session. Tour en cours : la copie sur disque n'a que la demande, on prend la copie vivante du coeur (blocs deja
+   *  recus, autorisation en attente), puis les evenements arrives pendant la lecture, sans doublon (tseq). */
+  private opening: { id: string; buf: any[] } | null = null;
+  async loadSession(id: string, quiet = false): Promise<boolean> {
+    const op = { id, buf: [] as any[] };
+    this.opening = op;
+    try {
+      let s = await api<Session>(`/api/sessions/${id}`);
+      const t = s.transcript;
+      if (s.running || (t.length && t[t.length - 1].kind === "assistant" && (t[t.length - 1] as AssistantItem).status === "running")) {
+        try {
+          s = await api<Session>(`/api/sessions/${id}/live`);
+        } catch {
+          s = await api<Session>(`/api/sessions/${id}`);   // tour fini entre-temps : la copie sur disque est complete
+        }
+      }
+      if (this.opening !== op) return false;   // une autre session a ete ouverte entre-temps
+      this.session = s;
+      for (const e of op.buf) this.applyTurnEvent(e);
+      return true;
     } catch (e) {
       if (!quiet) this.toast("error", "Session introuvable", String(e));
+      return false;
+    } finally {
+      if (this.opening === op) this.opening = null;
     }
   }
 
@@ -274,7 +306,11 @@ class AppState {
         else s.transcript.push(user, newAssistant(r.turn_id, this.planMode));
       }
       if (this.core && !this.core.running.includes(s.id)) this.core.running = [...this.core.running, s.id];
-      if (s.title === "Nouvelle session") s.title = text.split("\n")[0].slice(0, 64);
+      if (s.title === "Nouvelle session") {
+        s.title = text.split("\n")[0].slice(0, 64);
+        const row = this.core?.sessions.find((x) => x.id === s.id);   // barre laterale tout de suite (turn.queued la relit aussi)
+        if (row && row.title === "Nouvelle session") row.title = s.title;
+      }
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       this.toast("error", "Envoi impossible", msg);
@@ -286,11 +322,13 @@ class AppState {
     if (this.session) await api(`/api/sessions/${this.session.id}/cancel`, { method: "POST", body: {} });
   }
 
-  async respondPermission(id: string, allow: boolean, remember = false) {
+  async respondPermission(id: string, allow: boolean, remember = false): Promise<boolean> {
     try {
       await api(`/api/permissions/${id}`, { body: { allow, remember } });
+      return true;
     } catch (e) {
       this.toast("warn", "Demande expiree", String(e));
+      return false;
     }
   }
 
@@ -309,7 +347,7 @@ class AppState {
     try {
       const r = await api<{ jobs: DownloadJob[]; errors: Record<string, string> }>("/api/install", { body: { items } });
       for (const j of r.jobs) this.downloads[j.id] = j;
-      for (const [id, err] of Object.entries(r.errors)) this.toast("error", `Installation de ${id} impossible`, err, 8000);
+      for (const [id, err] of Object.entries(r.errors)) this.toast("error", `Installation de ${id} impossible`, frText(err), 8000);
       return r;
     } catch (e) {
       this.toast("error", "Installation impossible", String(e));
@@ -338,7 +376,7 @@ class AppState {
     try {
       const b = await api("/api/bench", { method: "POST", body: {} });
       if (this.core) this.core.bench = b;
-      this.toast("ok", "Mesure terminee", `${b.s2_tok_s} tok/s · decisions ${b.s1_p50_ms} ms`);
+      this.toast("ok", "Mesure terminee", `${num(b.s2_tok_s, 1)} tok/s · decision p50 ${num(b.s1_p50_ms, 1)} ms`);
     } catch (e) {
       this.toast("error", "Mesure impossible", String(e));
     } finally {

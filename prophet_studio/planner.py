@@ -51,6 +51,10 @@ class Plan:
     notes: list[str] = field(default_factory=list)
     rung: int = 0
     title: str = ""
+    # memoire vive demandee (poids hors GPU, KV en RAM, classifieur sur CPU) : ram_short au-dela de 85 % de la RAM, sur tout
+    # backend (un plan GPU partiel ou un gros classifieur sur CPU aussi) ; l'interface ne le lance jamais sans accord explicite
+    ram_short: bool = False
+    ram: dict = field(default_factory=dict)   # {"needed_mib", "total_mib"}
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,6 +98,19 @@ def s1_mib(m: ModelSpec, np: int = 1) -> dict:
 def _fr(x: float, d: int = 1) -> str:
     """Nombre a la francaise pour les notes affichees (virgule decimale)."""
     return f"{x:.{d}f}".replace(".", ",")
+
+
+RAM_LIMIT = 0.85   # part de la RAM au-dela de laquelle un plan est juge trop gros (systeme, navigateur, cache des prompts)
+
+
+def _ram_check(hw: HardwareInfo, need_mib: float, notes: list[str], what: str) -> tuple[dict, bool]:
+    """Plans GPU : RAM prise par ce qui reste hors de la carte. Note en clair si elle depasse RAM_LIMIT (RAM inconnue : muet)."""
+    total = hw.ram_total_gib * 1024
+    short = total > 0 and need_mib >= total * RAM_LIMIT
+    if short:
+        notes.append(f"RAM insuffisante : ~{_fr(need_mib / 1024)} Gio necessaires en RAM ({what}) pour {_fr(hw.ram_total_gib)} Gio "
+                     "installes ; chargement tres lent (disque) ou echec : choisissez un modele plus petit ou fermez des applications.")
+    return {"needed_mib": round(need_mib), "total_mib": round(total)}, short
 
 
 def expected_speed(g: GPU | None, m: ModelSpec, device: str) -> dict:
@@ -173,7 +190,8 @@ def cpu_plan(hw: HardwareInfo, priority: str, s2_override: str = "auto", s1_over
     return Plan("cpu", priority, ServerPlan("s2", s2m.id, "cpu", 0, ctx, 1, "q8_0", "off", 1024, threads),
                 ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS_CPU, S1_KV, threads=threads),
                 {"ram_needed_mib": round(need), "ram_total_mib": round(ram * 1024)}, need < ram * 1024 * 0.85,
-                {"s2": {"tok_s": None, "basis": "CPU"}, "s1_ms": [150, 400]}, notes, title=f"CPU · {s2m.label}")
+                {"s2": {"tok_s": None, "basis": "CPU"}, "s1_ms": [150, 400]}, notes, title=f"CPU · {s2m.label}",
+                ram_short=need >= ram * 1024 * 0.85, ram={"needed_mib": round(need), "total_mib": round(ram * 1024)})
 
 
 def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = "auto", s1_override: str = "auto",
@@ -223,8 +241,15 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         s2 = ServerPlan("s2", m.id, "partial" if ngl > 0 else "cpu", ngl, 4096, 1, kv, "off", 1024, threads=hw.cpu_cores)
         s1 = ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS_CPU, S1_KV, threads=hw.cpu_cores)
         budget = {"total": total, "other": other, **s2_mib(m, 4096, kv, False), "s2_weights": per_layer * ngl, "free": 0.0}
-        return Plan(backend, priority, s2, s1, budget, False, {"s2": expected_speed(g, m, s2.device), "s1_ms": [150, 400]}, notes,
-                    title=f"{g.name} · {m.label} (partiel)")
+        # hors de la carte : couches non dechargees et leur KV (tout en memoire unifiee sur Metal), tampons, classifieur sur CPU
+        share = 1.0 if backend == "metal" else 1.0 - min(ngl, S2_LAYERS) / S2_LAYERS
+        need = ((_gib(m.weights_gib) + kv_mib(m, 4096, kv)) * share + _overhead_mib(m) * (1.0 if share == 1.0 else 0.25)
+                + sum(s1_mib(s1m, s1.np).values()))
+        ram, short = _ram_check(hw, need, notes, "couches hors GPU et classifieur")
+        speed = ({"tok_s": None, "basis": "RAM insuffisante : limite par le disque, a mesurer (bench)"} if short
+                 else expected_speed(g, m, s2.device))
+        return Plan(backend, priority, s2, s1, budget, False, {"s2": speed, "s1_ms": [150, 400]}, notes,
+                    title=f"{g.name} · {m.label} (partiel)", ram_short=short, ram=ram)
 
     m, ctx, s1_gpu = chosen
     mm = "gpu" if mmproj_gpu else "cpu"
@@ -257,9 +282,13 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         notes.append("Blackwell (sm_120) : runtime CUDA 12.8+ selectionne automatiquement.")
     if m.id in MEASURED:
         notes.append(f"Budget calibre sur cette machine : surcout mesure de {MEASURED[m.id]:.0f} Mio pour {m.label}.")
+    # en RAM : classifieur sur CPU (un gros GGUF importe peut ne pas tenir), projecteur vision hors GPU
+    need = (0.0 if s1.device == "gpu" else sum(s1_mib(s1m, s1.np).values())) + (_gib(m.mmproj_gib) if s2.mmproj == "cpu" else 0.0)
+    ram, short = _ram_check(hw, need, notes, "classifieur sur CPU" + (" et projecteur vision" if s2.mmproj == "cpu" else ""))
     title = f"{g.name} · {m.label} · {ctx // 1024}k"
-    return Plan(backend, priority, s2, s1, budget, True,
-                {"s2": expected_speed(g, m, "gpu"), "s1_ms": [40, 150] if s1_gpu else [100, 350]}, notes, title=title)
+    return Plan(backend, priority, s2, s1, budget, not short,
+                {"s2": expected_speed(g, m, "gpu"), "s1_ms": [40, 150] if s1_gpu else [100, 350]}, notes, title=title,
+                ram_short=short, ram=ram)
 
 
 def degrade(plan: Plan, installed: set[str] | None = None) -> Plan | None:
