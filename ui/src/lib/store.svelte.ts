@@ -335,6 +335,62 @@ class AppState {
   get activeDownloads(): DownloadJob[] {
     return Object.values(this.downloads).filter((j) => ["queued", "running", "verifying", "extracting"].includes(j.status));
   }
+
+  // ---- classifieur (System One) : calibration par modele -----------------------------------------------------------------
+  calibrating = $state<import("./types").S1CalibrationProgress | null>(null);
+
+  /** Calibrations presentes, par id de modele (`installed.calibration`). */
+  get calibrations(): Record<string, import("./types").S1Calibration> {
+    const inst = this.core?.installed as { calibration?: Record<string, import("./types").S1Calibration> } | undefined;
+    return inst?.calibration ?? {};
+  }
+  /** Classifieur reellement en marche ; null en mode mono (Bonsai repond aux questions System One) ou moteur arrete. */
+  get activeS1(): string | null {
+    const r = this.core?.runtime;
+    return r && this.ready && !r.mono && r.plan?.s1 ? r.plan.s1.model_id : null;
+  }
+  /** Vrai seulement si une calibration valide est chargee pour le classifieur en marche. */
+  get s1Calibrated(): boolean {
+    const m = this.activeS1;
+    const c = m ? this.calibrations[m] : undefined;
+    return !!c && !c.error;
+  }
+
+  async calibrateS1() {
+    const model = this.activeS1;
+    if (!model || this.calibrating) return;
+    this.calibrating = { model, done: 0, total: 0 };
+    // progression : evenements s1.calibration lus sur une connexion dediee, le temps de la calibration
+    const stop = connectEvents(
+      (e) => {
+        if (e.type === "s1.calibration" && e.status === "running" && this.calibrating) this.calibrating = { model: e.model, done: e.done, total: e.total };
+      },
+      () => {},
+    );
+    try {
+      const r = await api<{ model_id: string; n: number; report?: Record<string, { before: { ece: number }; after: { ece: number } }> }>("/api/calibrate", { body: {} });
+      const nl = r.report?.noul;
+      this.toast("ok", "Classifieur calibre", `${r.model_id} · ${r.n} exemples${nl ? ` · ECE oui/non ${nl.before.ece.toFixed(3)} -> ${nl.after.ece.toFixed(3)}` : ""}`, 7000);
+      this.refreshSoon();
+    } catch (e) {
+      this.toast("error", "Calibration impossible", e instanceof ApiError ? e.message : String(e), 8000);
+    } finally {
+      stop();
+      this.calibrating = null;
+    }
+  }
+
+  async importCalibration(path: string, model_id: string): Promise<boolean> {
+    try {
+      const r = await api<{ model_id: string }>("/api/calibration/import", { body: { path, model_id } });
+      this.toast("ok", "Calibration importee", r.model_id);
+      this.refreshSoon();
+      return true;
+    } catch (e) {
+      this.toast("error", "Import de la calibration impossible", e instanceof ApiError ? e.message : String(e), 8000);
+      return false;
+    }
+  }
 }
 
 export const app = new AppState();
