@@ -6,6 +6,7 @@
   import { fuzzy, matchSlash, type Command } from "../lib/commands";
   import { startPtt, stopPtt } from "../lib/voice";
   import type { PermissionMode } from "../lib/types";
+  import { PERM } from "../lib/perm";
 
   let ta: HTMLTextAreaElement | undefined = $state();
   let focused = $state(false);
@@ -20,11 +21,6 @@
     mention ? files.map((f) => [f, fuzzy(mention!.q, f)] as const).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([f]) => f) : [],
   );
   const menuLen = $derived(slash.length || mentionHits.length);
-  const PERM: Record<PermissionMode, { label: string; desc: string }> = {
-    smart: { label: "Smart", desc: "Le classifieur juge chaque action et ne demande que si elle est risquee" },
-    ask: { label: "Demander", desc: "Confirmer chaque ecriture et chaque commande" },
-    auto: { label: "Auto", desc: "Ne jamais demander (a vos risques)" },
-  };
   const perm = $derived((app.settings?.permission_mode ?? "smart") as PermissionMode);
   const effort = $derived(app.effortOnce ?? app.settings?.effort ?? "auto");
 

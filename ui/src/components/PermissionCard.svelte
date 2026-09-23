@@ -43,9 +43,14 @@
   const grantable = $derived(typeof j.grant === "string" && !hard);
   const unsure = $derived(judged && !hard && !grantable && !!j.needs_confirmation);
   const cls = $derived(grantable && j.grant.includes(":") ? j.grant.slice(j.grant.indexOf(":") + 1) : "");
+  // « dites accepte » seulement si la voix peut l'entendre : commandes vocales actives, moteur et modele de reconnaissance presents
+  const voiceOk = $derived(app.settings?.voice.enabled === true && !!app.core?.voice?.engine && !!app.core?.voice?.stt_installed);
+  let sent = $state(false);   // une seule reponse par carte (double clic, touche + clic) avant permission.resolved
 
   function decide(allow: boolean, remember = false) {
-    if (pending) app.respondPermission(b.id, allow, remember && grantable);
+    if (!pending || sent) return;
+    sent = true;
+    app.respondPermission(b.id, allow, remember && grantable).then((ok) => (sent = ok));
   }
 
   function onKey(e: KeyboardEvent) {
@@ -98,8 +103,11 @@
         <div class="same">Contenu identique au fichier existant : aucune modification.</div>
       {:else if b.preview?.old != null && b.preview?.new != null}
         <DiffView oldText={b.preview.old} newText={b.preview.new} max={120} />
+      {:else if b.preview?.action}
+        <div class="cmd">{b.preview.action}</div>
       {:else if b.preview?.command}
-        <div class="cmd mono"><span class="ps">$</span> {b.preview.command}</div>
+        <!-- invite shell seulement pour une vraie commande (navigateur, bureau, pas du computer use : du texte) -->
+        <div class="cmd" class:mono={b.tool === "run_command"}>{#if b.tool === "run_command"}<span class="ps">$</span>{" "}{/if}{b.preview.command}</div>
       {:else if b.preview?.code}
         <pre class="code mono">{@html highlight(b.preview.code, "python")}</pre>
       {:else}
@@ -117,7 +125,7 @@
         </button>
       {/if}
       <button class="btn ghost sm danger" onclick={() => decide(false)}>Refuser <span class="kbd">N</span></button>
-      <span class="hint faint">ou dites « accepte » / « refuse »</span>
+      {#if voiceOk}<span class="hint faint">ou dites « accepte » / « refuse »</span>{/if}
     </div>
   {/if}
 </div>

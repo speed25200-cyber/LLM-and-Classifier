@@ -1,6 +1,7 @@
 // Commandes : barre oblique (/), palette (Ctrl+K) et commandes vocales partagent les memes actions.
 import { app } from "./store.svelte";
 import { speaker, toggleHandsfree } from "./voice";
+import { PERM } from "./perm";
 
 export interface Command {
   id: string;
@@ -18,9 +19,9 @@ export const commands: Command[] = [
   { id: "plan_on", title: "Mode plan (lecture seule, propose un plan)", slash: "/plan", keys: "Maj Tab", group: "Agent", run: () => (app.planMode = !app.planMode) },
   { id: "effort_deep", title: "Reflexion profonde pour le prochain message", slash: "/profond", group: "Agent", run: () => (app.effortOnce = "deep") },
   { id: "effort_fast", title: "Reponse rapide pour le prochain message", slash: "/rapide", group: "Agent", run: () => (app.effortOnce = "fast") },
-  { id: "perm_smart", title: "Autorisations : le classifieur decide (smart)", slash: "/smart", group: "Agent", run: () => app.updateSettings({ permission_mode: "smart" }) },
-  { id: "perm_ask", title: "Autorisations : toujours demander", slash: "/demander", group: "Agent", run: () => app.updateSettings({ permission_mode: "ask" }) },
-  { id: "perm_auto", title: "Autorisations : ne jamais demander", slash: "/auto", group: "Agent", run: () => app.updateSettings({ permission_mode: "auto" }) },
+  { id: "perm_smart", title: `Autorisations : ${PERM.smart.label} (le classifieur decide)`, slash: "/smart", group: "Agent", run: () => app.updateSettings({ permission_mode: "smart" }) },
+  { id: "perm_ask", title: `Autorisations : ${PERM.ask.label}`, slash: "/demander", group: "Agent", run: () => app.updateSettings({ permission_mode: "ask" }) },
+  { id: "perm_auto", title: `Autorisations : ${PERM.auto.label}`, slash: "/auto", group: "Agent", run: () => app.updateSettings({ permission_mode: "auto" }) },
   { id: "files", title: "Afficher les fichiers de l'espace de travail", slash: "/fichiers", keys: "Ctrl B", group: "Navigation", run: () => (app.inspectorOpen = !app.inspectorOpen) },
   { id: "open_models", title: "Modeles et materiel", slash: "/modeles", group: "Navigation", run: () => (app.view = "models") },
   { id: "open_settings", title: "Reglages", slash: "/reglages", keys: "Ctrl ,", group: "Navigation", run: () => (app.view = "settings") },

@@ -23,8 +23,13 @@
       { what: "Classifieur", want: c.settings.s1_model, got: plan.s1?.model_id ?? "" },
     ].filter((o) => o.want && o.want !== "auto" && o.want !== o.got),
   );
-  // plan CPU qui ne tient pas en RAM (poids + KV > 85 % de la RAM) : jamais lance sans un accord explicite
-  const ramShort = $derived(plan.backend === "cpu" && plan.rung === 0 && !plan.fits);
+  // plan qui ne tient pas en RAM (> 85 % : CPU, couches hors GPU d'un plan partiel, gros classifieur sur CPU) : jamais lance
+  // sans un accord explicite (ancien coeur sans ram_short : plans CPU seulement)
+  const ramShort = $derived(plan.rung === 0 && (plan.ram_short ?? (plan.backend === "cpu" && !plan.fits)));
+  const ramNeed = $derived(plan.ram?.needed_mib ?? plan.budget.ram_needed_mib ?? 0);
+  const ramTotal = $derived(plan.ram?.total_mib ?? plan.budget.ram_total_mib ?? 0);
+  // Bonsai ne tient pas entier en VRAM (dechargement partiel) : applicable, mais jamais sans le dire
+  const vramShort = $derived(plan.rung === 0 && !plan.fits && !ramShort && plan.backend !== "cpu");
   const RAM_TITLE = "RAM insuffisante pour ce plan : voir l'avertissement de la configuration";
   const s1Installed = $derived(c.catalog.models.filter((m) => m.role === "s1" && c.installed.models[m.id]?.installed));
   const missingCustom = $derived(Object.entries(c.installed.models).filter(([, v]) => v.custom && !v.installed));
@@ -155,15 +160,25 @@
         <div class="warnbox ram">
           <TriangleAlert size={14} />
           <span class="wtxt">
-            RAM insuffisante : ce plan demande ~{mibToGib(plan.budget.ram_needed_mib ?? 0)} pour {mibToGib(plan.budget.ram_total_mib ?? 0)} de RAM
+            RAM insuffisante : ce plan demande ~{mibToGib(ramNeed)} pour {mibToGib(ramTotal)} de RAM
             (limite 85 %). Chargement tres lent (disque) ou echec : choisissez un modele plus petit.
           </span>
           <button class="btn sm danger" onclick={() => app.startRuntime()}>Lancer quand meme</button>
         </div>
+      {:else if vramShort}
+        <div class="warnbox vram">
+          <TriangleAlert size={14} />
+          <span class="wtxt">
+            VRAM insuffisante : {plan.s2.ngl > 0 ? `${plan.s2.ngl} couches de Bonsai sur GPU, le reste sur CPU` : "Bonsai entierement sur CPU"} ;
+            generation bien plus lente{plan.expected.s2.tok_s ? ` (~${plan.expected.s2.tok_s[0]}-${plan.expected.s2.tok_s[1]} tok/s)` : ""}.
+          </span>
+        </div>
       {/if}
       <ul class="notes">{#each plan.notes as n}<li>{n}</li>{/each}</ul>
       {#if replanNeeded && !ramShort}
-        <button class="btn accent" onclick={() => app.startRuntime()}><RotateCw size={15} /> Appliquer et redemarrer</button>
+        <button class="btn accent" onclick={() => app.startRuntime()}>
+          <RotateCw size={15} /> {vramShort ? "Appliquer quand meme (plus lent)" : "Appliquer et redemarrer"}
+        </button>
       {/if}
     </section>
   </div>
@@ -187,13 +202,20 @@
     <div class="servers">
       {#each SERVERS as { key, label, Icon } (key)}
         {@const s = c.runtime.servers[key]}
+        {@const monoRow = key === "s1" && c.runtime.mono && (c.runtime.state === "ready" || c.runtime.state === "degraded")}
+        {@const up = s.state === "starting" || s.state === "loading" || s.state === "ready"}
+        <!-- mode mono : le classifieur ne tourne pas, ses decisions passent par Bonsai (jamais le port d'un serveur arrete) -->
         <div class="srv">
           <span class="sic {key}"><Icon size={16} /></span>
           <div class="st">
             <b>{label}</b>
             <span class="faint tabnum">
-              <span class="dot {s.state === 'ready' ? 'ok' : s.state === 'crashed' || s.state === 'oom' ? 'err' : s.state === 'stopped' ? '' : 'busy'}"></span>
-              {key === "s1" && c.runtime.mono ? "mode mono (Bonsai decide aussi)" : STATE_FR[s.state] ?? s.state}{s.port ? ` · :${s.port}` : ""}{s.load_s ? ` · charge en ${num(s.load_s, 1)} s` : ""}
+              <span class="dot {monoRow ? 'warn' : s.state === 'ready' ? 'ok' : s.state === 'crashed' || s.state === 'oom' ? 'err' : s.state === 'stopped' ? '' : 'busy'}"></span>
+              {#if monoRow}
+                mode mono (Bonsai decide aussi){c.runtime.servers.s2.port ? ` · via :${c.runtime.servers.s2.port}` : ""}
+              {:else}
+                {STATE_FR[s.state] ?? s.state}{up && s.port ? ` · :${s.port}` : ""}{s.state === "ready" && s.load_s ? ` · charge en ${num(s.load_s, 1)} s` : ""}
+              {/if}
             </span>
           </div>
           <button class="icon-btn" title="Journal" onclick={() => showLogs(key)}><ScrollText size={14} /></button>

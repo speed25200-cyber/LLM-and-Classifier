@@ -524,6 +524,15 @@ def build_app(studio: Studio) -> FastAPI:
         s["running"] = sid in studio.agent.running
         return s
 
+    # tour en cours : copie vivante (blocs deja recus, autorisation en attente), la copie sur disque n'a que la demande ;
+    # 404 quand aucun tour ne tourne (l'interface relit alors /api/sessions/{sid}, complete)
+    @app.get("/api/sessions/{sid}/live")
+    def live_session(sid: str):
+        s = studio.agent.snapshot(sid)
+        if s is None:
+            raise HTTPException(404, "aucun tour en cours")
+        return s
+
     @app.patch("/api/sessions/{sid}")
     async def patch_session(sid: str, request: Request):
         s, b = _load(sid), await request.json()

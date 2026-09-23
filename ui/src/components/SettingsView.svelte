@@ -3,6 +3,7 @@
   import { toggleHandsfree } from "../lib/voice";
   import { fixed } from "../lib/format";
   import type { Settings } from "../lib/types";
+  import { PERM, PERM_MODES } from "../lib/perm";
 
   let { onTheme, theme }: { onTheme: () => void; theme: string } = $props();
   const s = $derived(app.core!.settings);
@@ -10,7 +11,11 @@
   // computer use : disponibilite reelle (Playwright + Chromium, Windows pour le bureau) ; ancien coeur sans ce champ = disponible
   const browserOk = $derived(app.core!.browser?.available ?? true);
   const desktopOk = $derived(app.core!.desktop?.available ?? false);
-  const STEP_NOTE = "Chaque clic, saisie, raccourci ou lancement est juge par le classifieur avant execution ; un pas juge risque vous est demande (sauf autorisations « Jamais »).";
+  // decrit le mode d'autorisation choisi (memes noms que la zone de saisie)
+  const STEP_NOTE = $derived(
+    `Chaque clic, saisie, raccourci ou lancement est juge par le classifieur avant execution ; ${s.permission_mode === "auto"
+      ? `en mode « ${PERM.auto.label} », meme un pas juge risque s'execute sans question.` : "un pas juge risque vous est demande."}`,
+  );
 
   function set(patch: Partial<Settings> | Record<string, unknown>) {
     app.updateSettings(patch);
@@ -53,9 +58,9 @@
   <section class="card rise">
     <div class="panel-title">Agent</div>
     <div class="row">
-      <div class="lab"><b>Autorisations</b><span>Smart : le classifieur juge chaque action (~100 ms) et ne demande que si elle est risquee.</span></div>
+      <div class="lab"><b>Autorisations</b><span>{PERM[s.permission_mode]?.desc ?? ""}</span></div>
       <div class="seg">
-        {#each [["smart", "Smart"], ["ask", "Toujours demander"], ["auto", "Jamais"]] as [k, l] (k)}<button class:on={s.permission_mode === k} onclick={() => set({ permission_mode: k })}>{l}</button>{/each}
+        {#each PERM_MODES as k (k)}<button class:on={s.permission_mode === k} onclick={() => set({ permission_mode: k })}>{PERM[k].label}</button>{/each}
       </div>
     </div>
     <div class="row">

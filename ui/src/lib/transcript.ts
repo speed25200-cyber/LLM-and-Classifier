@@ -7,7 +7,12 @@ export function newAssistant(turn_id: string, plan_mode = false): AssistantItem 
   return { kind: "assistant", turn_id, blocks: [], status: "running", ts: Date.now() / 1000, plan_mode, pending_tool: null };
 }
 
-export function reduce(item: AssistantItem, evt: any): void {
+/** Applique un evenement du tour ; faux si deja applique (tseq : copie vivante relue apres un rechargement). */
+export function reduce(item: AssistantItem, evt: any): boolean {
+  if (typeof evt.tseq === "number") {
+    if (evt.tseq <= (item.tseq ?? 0)) return false;
+    item.tseq = evt.tseq;
+  }
   const blocks = item.blocks;
   const ts: number = evt.ts ?? Date.now() / 1000;   // horodatage serveur (s) : memes durees en direct et au rechargement
   const last = blocks[blocks.length - 1];
@@ -87,6 +92,7 @@ export function reduce(item: AssistantItem, evt: any): void {
       reduceComputer(blocks, evt);
       break;
   }
+  return true;
 }
 
 // ---- computer use : progression par pas (miroir de prophet_studio/sessions.py:reduce_computer) ----
