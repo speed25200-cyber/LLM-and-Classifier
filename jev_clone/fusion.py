@@ -41,13 +41,16 @@ class GatePolicy:
     budgets: tuple[int, ...] = (0, 512, 2048, 8192)   # budget de reflexion Bonsai par niveau de risque
     always_escalate_if: dict[str, Any] = field(default_factory=dict)  # ex. {"needs_reasoning": True}
     verify_with_s1: bool = False             # S1 relit la reponse de Bonsai (question noul de coherence)
+    cal: Calibration | None = field(default=None, repr=False)   # calibration d'ou viennent les seuils (from_calibration)
 
     @classmethod
     def from_calibration(cls, cal: Calibration, **kw) -> "GatePolicy":
-        return cls(thresholds=dict(cal.thresholds), **kw)
+        return cls(thresholds=dict(cal.thresholds), cal=cal, **kw)
 
-    def threshold(self, qid: str) -> float:
-        if qid not in self.thresholds:
+    def threshold(self, qid: str, q=None, state=None) -> float:
+        """Seuil de la porte ; un seuil calibre ne vaut que la ou sa temperature s'applique (meme question, meme forme d'etat) :
+        ailleurs la lecture est brute, seuil par defaut (jamais un seuil ajuste apres temperature sur une lecture brute)."""
+        if qid not in self.thresholds or (self.cal is not None and q is not None and self.cal.entry(qid, q, state) is None):
             return float(self.default_threshold)
         v = self.thresholds[qid]
         return math.inf if v is None else float(v)   # aucun seuil fiable a la calibration : toujours escalader
@@ -164,7 +167,7 @@ class FusionRouter:
         s1 = self.s1.answer(req)
         gated, decisions = {}, {}
         for qid, a in s1.answers.items():
-            ok = answer_confidence(a) >= self.policy.threshold(qid)
+            ok = answer_confidence(a) >= self.policy.threshold(qid, req.questions.get(qid), req.state)
             forced = self.policy.always_escalate_if.get(qid)
             if forced is not None and answer_value(a) == forced:
                 ok = False

@@ -58,6 +58,8 @@ PROPHET_TURN = with_meta({
     "intent": {"type": "choice", "instructions": "Observation only: what kind of request is this?", "criteria": INTENTS},
     "language": {"type": "choice", "instructions": "Observation only: if code is involved, which stack fits best?", "criteria": LANGUAGES},
 })
+# decision que Prophet prend seul sur chaque porte (index de l'option) : voie directe 'oui', 'sans reflexion', risque 0
+GATE_OPTIONS = {"direct": 0, "needs_reasoning": 1, "risk": 0}
 
 SYSTEM_PROMPT = """You are Prophet, a general-purpose local agent running on the user's machine. You can do anything the user asks:
 write and run code, create complete applications, operate the shell, use the web, keep notes, and build new tools for
@@ -79,23 +81,50 @@ in this reply, so never claim to have created, read, changed or run anything.
 If a correct answer really needs files, commands, the web or several steps of work, reply with exactly NEEDS_TOOLS and nothing else.
 {memory}"""
 NEEDS_TOOLS = "NEEDS_TOOLS"
-# NEEDS_TOOLS n'importe ou dans la reponse, meme entoure de markdown (`NEEDS_TOOLS`, **NEEDS_TOOLS**, NEEDS\_TOOLS)
-NEEDS_TOOLS_RX = re.compile(r"(?<![A-Za-z0-9])NEEDS\\?_TOOLS(?![A-Za-z0-9])", re.IGNORECASE)
+# NEEDS_TOOLS n'importe ou dans la reponse, meme entoure de markdown (`NEEDS_TOOLS`, **NEEDS_TOOLS**, NEEDS\_TOOLS) ; en
+# minuscules seulement comme reponse entiere (l'identifiant `needs_tools` d'une reponse sur du code n'est pas le marqueur)
+NEEDS_TOOLS_RX = re.compile(r"(?<![A-Za-z0-9])NEEDS\\?_TOOLS(?![A-Za-z0-9])|(?i:^\W*needs\\?_tools\W*$)")
 # une reponse directe qui pretend avoir agi (sans outils, c'est faux) ou dit ne pas avoir acces : la voie agent s'impose.
-# Un verbe d'ecriture ne compte qu'avec un objet du disque dans la meme proposition (poeme ecrit, texte modifie, liste mise
-# a jour : reponses normales) ; un verbe d'execution compte toujours. Apostrophes droites et typographiques.
+# Un verbe d'ecriture ne compte qu'avec un objet du disque dans la meme proposition : un nom de fichier a extension connue
+# (pas i.e., e.g., p.ex., U.S., os.path, json.loads(), wikipedia.org, Node.js) qui n'est pas montre en exemple (bloc de code,
+# modele, ci-dessous), ou un nom commun du disque (poeme ecrit, texte modifie, liste mise a jour : reponses normales). Un verbe
+# d'execution compte avec un objet reel (pas une verification de tete : « I tested it on the example »). Voix passive
+# (« le fichier notes.txt a ete cree »). Apostrophes droites et typographiques.
 _A = "['\\u2019\\u2018\\u02bc]"   # ' et apostrophes typographiques (classe de regex : echappements lus par re)
-_FS_OBJ = (r"(?:(?<![\w\-./\\])(?!(?:node|vue|next|nuxt|express|three|chart|react|d3|p5)\.js\b)[\w\-./\\]*\w\.[a-z][a-z0-9]{0,4}\b"
-           r"|\b(?:files?|fichiers?|folders?|dossiers?|director(?:y|ies)|r[eé]pertoires?|disk|disque|workspace|espace de travail)\b)")
-_WRITE_VERB = (rf"(?:\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:created|written|wrote|saved|updated|modified|edited|deleted|removed|added|generated)\b"
-               rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:cr[eé][eé]|[eé]crit|enregistr[eé]|modifi[eé]|mis [aà] jour|supprim[eé]|ajout[eé]|g[eé]n[eé]r[eé])(?!\w))")
-_RUN_OBJ = r"(?:it|this|that|(?:your|the) (?:code|script|command|program|tests?|server|app|function))\b"
-_EXEC_VERB = (rf"\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:executed|installed|launched)\b|\bi (?:ran|tested|started) {_RUN_OBJ}"
-              rf"|\bi(?:{_A}ve| have) (?:just |now |already |also )?(?:run|tested|started) {_RUN_OBJ}"
-              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:ex[eé]cut[eé]|install[eé])(?!\w)"
-              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:lanc[eé]|test[eé]|d[eé]marr[eé]) (?:ton|ta|tes|votre|vos|le|la|les|ce|cette|ces) "
-              r"(?:code|script|programme|commande|serveur|tests?|application|appli|app)\b")
-CLAIMS_ACTION = re.compile(_WRITE_VERB + r"[^\n.!?:;]{0,40}?" + _FS_OBJ + "|" + _EXEC_VERB
+_EXT = (r"(?:py|pyw|ipynb|js|mjs|cjs|jsx|ts|tsx|vue|svelte|html?|css|scss|sass|less|json|jsonl|ya?ml|toml|ini|cfg|conf|env|lock|md|rst"
+        r"|txt|csv|tsv|xml|sql|sqlite|db|log|sh|bash|zsh|ps1|psm1|bat|cmd|rs|go|java|kt|kts|c|cc|cpp|h|hpp|cs|rb|php|pl|lua|r|jl"
+        r"|swift|dart|gradle|pdf|docx?|xlsx?|pptx?|odt|png|jpe?g|gif|svg|webp|ico|mp3|wav|mp4|zip|tar|gz|exe|dll|so|whl|gguf|safetensors)")
+_LIBJS = (r"(?:node|vue|next|nuxt|express|three|chart|react|d3|p5|angular|ember|alpine|backbone|nest|solid|preact|moment|anime|pixi"
+          r"|babylon|leaflet|video|tone|paper|matter)")
+_FILE = rf"(?<![\w\-./\\])(?!{_LIBJS}\.js\b)[\w\-./\\]*\w\.{_EXT}\b(?![\w(])"
+_FS_NOUN = r"\b(?:files?|fichiers?|folders?|dossiers?|director(?:y|ies)|r[eé]pertoires?|disk|disque|workspace|espace de travail)\b"
+_EXAMPLE = r"(?:examples?|exemples?|templates?|samples?|mod[eè]les?)"
+_SHOWN = rf"(?:[^\n]{{0,80}}(?:\n\s*)?```|\s*[(,]?\s*(?:{_EXAMPLE}|ci-dessous|below|as follows|suivant)\b|\s*(?:here|ici)\s*:)"
+_WRITE_VERB = (rf"(?:\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:created|written|wrote|saved|updated|modified|edited|deleted|removed"
+               r"|added|generated|made|put|moved|copied|renamed|fixed|changed|corrected|replaced|refactored|rewritten|rewrote|overwritten"
+               r"|appended|downloaded|cloned)\b"
+               rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:cr[eé][eé]|[eé]crit|enregistr[eé]|modifi[eé]|mis [aà] jour|mis|plac[eé]|d[eé]plac[eé]"
+               r"|copi[eé]|renomm[eé]|supprim[eé]|ajout[eé]|g[eé]n[eé]r[eé]|corrig[eé]|chang[eé]|remplac[eé]|r[eé][eé]crit|t[eé]l[eé]charg[eé]"
+               r"|clon[eé])(?!\w))")
+_GAP = rf"(?:(?!\b{_EXAMPLE}\b)[^\n.!?:;]){{0,40}}?"   # meme proposition, jamais a travers « example / exemple / template »
+_RUN_NOUN = r"(?:code|script|command|program|tests?|test suite|server|app|application|function|build|migrations?|container)"
+_MENTAL = (r"(?:through|mentally|in my head|by hand|on paper|with [a-z]\s*=|(?:on|against|with) (?:the|your|an?|this|that) (?:\w+ )?"
+           r"(?:examples?|inputs? you gave|data you gave))")
+_RUN_OBJ = (rf"(?:(?:it|this|that)\b(?!\s+{_MENTAL})(?:(?<=it)|(?=\s*(?:[^\w\s]|$)|\s+(?:and|but|on|in|with|for|locally|again|myself|here"
+            rf"|now|out|quickly|too|{_RUN_NOUN})\b))|(?:your|the|my) (?:\w+ )?{_RUN_NOUN}\b)")
+_EXEC_VERB = (rf"\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:executed|installed)\b"
+              rf"|\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:launched|deployed) (?:it\b|(?:the|your|my) (?:\w+ )?{_RUN_NOUN}\b)"
+              rf"|\bi (?:ran|tested|started) {_RUN_OBJ}|\bi(?:{_A}ve| have) (?:just |now |already |also )?(?:run|tested|started) {_RUN_OBJ}"
+              rf"|\bi(?:{_A}ve| have)? (?:just |now |already |also )?(?:pushed|committed|uploaded) (?:the |your |these |all |my )?"
+              r"(?:changes?|code|commits?|branch|fix(?:es)?)\b"
+              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:ex[eé]cut[eé]|install[eé]|d[eé]ploy[eé])(?!\w)"
+              rf"|\bje (?:l{_A}|les )ai (?:bien |d[eé]j[aà] |aussi )?(?:ex[eé]cut[eé]|lanc[eé]|test[eé]|install[eé]|d[eé]ploy[eé])(?:e?s)?(?!\w)"
+              rf"(?!\s*(?:mentalement|de t[eê]te|[aà] la main|sur (?:le )?papier|sur (?:ton|votre|l{_A}) ?exemple))"
+              rf"|\bj{_A}ai (?:bien |d[eé]j[aà] |aussi )?(?:lanc[eé]|test[eé]|d[eé]marr[eé]|pouss[eé]) (?:ton|ta|tes|votre|vos|le|la|les|ce|cette|ces) "
+              r"(?:\w+ )?(?:code|script|programme|commande|serveur|tests?|application|appli|app|modifications?|changements?)\b")
+_PASSIVE = (rf"(?:\b(?:file|fichier|folder|dossier|script) \S+|{_FILE}) (?:a (?:bien )?[eé]t[eé]|has (?:just )?been|was|is now|est maintenant)"
+            r" (?:cr[eé]{2}e?|created|[eé]crite?|written|saved|enregistr[eé]e?|modifi[eé]e?|updated|g[eé]n[eé]r[eé]e?|generated)\b")
+CLAIMS_ACTION = re.compile(_WRITE_VERB + _GAP + "(?:" + _FILE + "(?!" + _SHOWN + ")|" + _FS_NOUN + ")|" + _EXEC_VERB + "|" + _PASSIVE
                            + rf"|\b(?:i (?:don{_A}t|do not|can{_A}t|cannot|can not) (?:have )?access|je n{_A}ai pas acc[eè]s|je ne peux pas acc[eé]der)"
                            r"|<tool_call>|\"name\":\s*\"(?:write_file|edit_file|run_command|python|done)\"", re.IGNORECASE)
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
@@ -999,11 +1028,12 @@ class Prophet:
 
     def _gates(self, state: dict) -> dict:
         """Seuils des portes du pre-tour : ceux de la calibration du S1 pour les questions qu'elle couvre (meme echelle que
-        les lectures, apres temperature), absents sinon (valeurs par defaut) ; inf = ne jamais se fier a cette lecture."""
+        les lectures, apres temperature), absents sinon (valeurs par defaut) ; inf = ne jamais se fier a cette lecture.
+        Chaque seuil vaut pour la decision que Prophet prend seul (GATE_OPTIONS) : precision des lectures 'direct = oui'."""
         cal = getattr(self.s1, "cal", None)
         if not isinstance(cal, Calibration):
             return {}
-        return {q: thr for q in ("direct", "needs_reasoning", "risk") if (thr := cal.gate(q, PROPHET_TURN[q], state)) is not None}
+        return {q: thr for q, k in GATE_OPTIONS.items() if (thr := cal.gate(q, PROPHET_TURN[q], state, option=k)) is not None}
 
     def _calibrated(self, state: dict) -> bool:
         """Une temperature ou un seuil calibre s'applique-t-il au pre-tour de ce tour ?"""
@@ -1023,13 +1053,13 @@ class Prophet:
     @staticmethod
     def _risk(pre: dict, gates: dict) -> tuple[int, bool]:
         """-> (niveau, lecture sure). Sans calibration du risque : niveau attendu arrondi. Calibre : niveau le plus probable
-        (la temperature ne le deplace pas) ; sous le seuil calibre, la lecture n'est pas sure : pas de voie directe et un
-        peu de reflexion, sans gonfler le niveau affiche."""
+        (la temperature ne le deplace pas) ; niveau 0 sous son seuil calibre : lecture pas sure, pas de voie directe et un
+        peu de reflexion, sans gonfler le niveau affiche (au-dela du niveau 0, le budget en comporte deja)."""
         probs = pre["risk"].get("probabilities")
         if "risk" not in gates or not probs:
             return int(round(pre["risk"]["score"])), True
         lvl, top = max(((int(k), float(v)) for k, v in probs.items()), key=lambda kv: (kv[1], kv[0]))
-        return lvl, top >= gates["risk"]
+        return lvl, lvl != 0 or top >= gates["risk"]   # seuil du niveau 0 (seul a ouvrir la voie directe sans reflexion)
 
     def _budget(self, pre: dict, effort: str, gates: dict | None = None) -> tuple[int, int]:
         gates = gates or {}

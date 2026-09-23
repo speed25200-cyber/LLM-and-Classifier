@@ -68,11 +68,13 @@ def main(argv=None):
 
     from jev_clone.backend_llamacpp import LlamaCppBackend
     from jev_clone.engine import SystemOneEngine
-    from jev_clone.readout import Calibration
+    from jev_clone.readout import load_calibration
 
     if args.cmd == "prophet":
         from jev_clone.prophet import Prophet, Workspace, confirm_in_terminal, make_browser_factory, repl
-        s1 = SystemOneEngine(LlamaCppBackend(args.s1, max_workers=4), calibration=Calibration.load(args.calibration))
+        # meme S1 pour le pre-tour, le garde-fou et le navigateur : seules les questions ajustees (sur leur forme d'etat)
+        # prennent la temperature du fichier ; temperature seule ou seuils perimes : ignores, dit sur stderr
+        s1 = SystemOneEngine(LlamaCppBackend(args.s1, max_workers=4), calibration=load_calibration(args.calibration, agent=True))
         s2 = LlamaCppBackend(args.s2, max_workers=1, timeout=600)
         # une seule autorisation pour les outils et pour chaque pas risque du navigateur (sans elle, tout pas risque est refuse)
         confirm = (lambda c, j: True) if args.yes else confirm_in_terminal
@@ -82,7 +84,7 @@ def main(argv=None):
 
     if args.cmd == "decide":
         args.instructions = dict(kv.split("=", 1) for kv in args.instruction)
-        engine = SystemOneEngine(LlamaCppBackend(args.server), calibration=Calibration.load(args.calibration))
+        engine = SystemOneEngine(LlamaCppBackend(args.server), calibration=load_calibration(args.calibration, agent=False))
         req = {"state": args.state, "questions": _questions_from_args(args), "permutations": args.permutations}
         print(json.dumps(engine.answer(req).model_dump(), ensure_ascii=False, indent=2))
         return

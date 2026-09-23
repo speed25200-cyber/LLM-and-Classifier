@@ -11,7 +11,7 @@ import os
 from jev_clone.backend_llamacpp import LlamaCppBackend
 from jev_clone.computer_use import BrowserSession, ComputerUseAgent, FastPolicy, SlowPolicy
 from jev_clone.engine import SystemOneEngine
-from jev_clone.readout import Calibration
+from jev_clone.readout import load_calibration
 from jev_clone.tools import SystemOneToolbox
 
 ap = argparse.ArgumentParser()
@@ -23,8 +23,9 @@ ap.add_argument("--vision", action="store_true", help="joindre une capture a Bon
 ap.add_argument("--max-steps", type=int, default=20)
 args = ap.parse_args()
 
+# le clone decide chaque pas et garde les pas risques (StepGuard) : seules ses questions ajustees prennent une temperature
 s1 = SystemOneEngine(LlamaCppBackend(os.environ.get("JEV_S1_URL", "http://127.0.0.1:8081"), max_workers=4),
-                     calibration=Calibration.load(os.environ.get("JEV_CALIBRATION")))
+                     calibration=load_calibration(os.environ.get("JEV_CALIBRATION"), agent=True))
 s2_url = os.environ.get("JEV_S2_URL")
 session = BrowserSession(headless=not args.headed, screenshot=args.vision)
 slow = SlowPolicy(LlamaCppBackend(s2_url, max_workers=1), session, SystemOneToolbox(s1), vision=args.vision) if s2_url else None

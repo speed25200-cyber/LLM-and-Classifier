@@ -7,9 +7,12 @@
     GGUF) : un GGUF remplace sur place rend la calibration perimee, jamais appliquee (l'etat le dit) ;
   * charge par AgentService pour le classifieur en marche seulement : jamais en mode mono (Bonsai n'est pas le
     modele calibre), jamais pour un autre S1 ; le cache des moteurs est invalide a chaque changement ;
-  * une temperature ne vaut que pour les questions du pre-tour sur lesquelles elle a ete ajustee : le garde-fou, la
-    voix et le computer use restent lus bruts ; une calibration generique (temperature seule, sans question connue)
-    n'est pas appliquee par Studio ;
+  * une temperature ne vaut que pour les questions sur lesquelles elle a ete ajustee, lues sur un etat de meme forme
+    (Calibration.for_agent) : le garde-fou, la voix et le computer use restent lus bruts ; une calibration generique
+    (temperature seule), ou dont aucune question n'est reconnue ici (autre jeu de donnees, etats texte), n'est pas
+    appliquee (erreur dans l'etat) ;
+  * seuils d'une version precedente (meta.version absente : ex aequo ignores, ou porte fixee sur les deux reponses) :
+    jamais appliques, portes par defaut ; l'etat le signale (stale_thresholds) : recalibrer ;
   * expose par modele dans l'etat (installed.calibration) : l'interface affiche "non calibre" sinon.
 """
 
@@ -95,23 +98,20 @@ def weights_check(cal: Calibration, current: Path | str | None = None) -> tuple[
 
 
 def usable(cal: Calibration) -> tuple[bool, str]:
-    """Studio n'applique une calibration qu'aux questions sur lesquelles elle a ete ajustee et aux poids calibres."""
+    """Studio n'applique une calibration qu'aux questions sur lesquelles elle a ete ajustee et aux poids calibres : ni
+    generique (temperature seule), ni sans question reconnue ici (elle retomberait sur tout, garde-fou compris)."""
     ok, why = weights_check(cal)
     if ok is False:
         return False, f"{why} : recalibrez ce classifieur (bouton Calibrer)"
-    if cal.generic and cal.is_active():
-        return False, ("calibration generique (temperature seule, sans question ajustee) : non appliquee, elle toucherait "
-                       "aussi le garde-fou et la voix ; recalibrez ce classifieur (bouton Calibrer)")
-    return True, ""
+    _, why = cal.for_agent()
+    return (False, f"{why} ; recalibrez ce classifieur (bouton Calibrer)") if why else (True, "")
 
 
 def for_studio(cal: Calibration) -> Calibration:
-    """Ancien fichier (temperature par primitive + seuils) : Studio ne l'applique qu'aux questions du pre-tour de Prophet
-    de ses seuils (reconnues a leur empreinte), jamais a un autre nom (tool_risk d'un jeu de validation, par ex.)."""
-    if cal.questions or not cal.thresholds:
-        return cal
-    keep = {q: {**e, "T": cal.t(e["kind"])} for q, e in cal.scope().items() if e.get("fp")}
-    return Calibration(temperature=dict(cal.temperature), thresholds={q: cal.thresholds[q] for q in keep}, meta=dict(cal.meta), questions=keep)
+    """Ce que Studio applique au S1 en marche (Calibration.for_agent) : questions ajustees reconnues (ancien format : celles
+    du pre-tour de Prophet, a leur empreinte ; jamais un tool_risk d'un jeu de validation ni un etat texte), jamais une
+    calibration generique, jamais des seuils perimes."""
+    return cal.for_agent()[0]
 
 
 def load_for_engine(path: str | Path | None) -> tuple[Calibration, str, str | None]:
@@ -151,8 +151,9 @@ def forget(runs: Path, model_id: str) -> None:
 
 
 def status(runs: Path, model_path: Callable[[str], Path | None] | None = None) -> dict[str, dict]:
-    """Calibrations presentes, par id de modele. Un fichier illisible, perime (poids remplaces) ou generique porte `error` :
-    signale, jamais applique en silence. model_path : GGUF enregistre de chaque modele (autre chemin = perimee)."""
+    """Calibrations presentes, par id de modele. Un fichier illisible, perime (poids remplaces), generique ou sans question
+    reconnue porte `error` : signale, jamais applique en silence ; des seuils d'une version precedente (ignores) portent
+    `stale_thresholds` et `warning`. model_path : GGUF enregistre de chaque modele (autre chemin = perimee)."""
     d = Path(runs) / "calibration"
     out: dict[str, dict] = {}
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
@@ -174,6 +175,10 @@ def status(runs: Path, model_path: Callable[[str], Path | None] | None = None) -
         good, why = usable(cal)
         if not good and "error" not in out[f.stem]:
             out[f.stem]["error"] = why
+        if cal.stale_thresholds and "error" not in out[f.stem]:   # temperatures appliquees, seuils ignores : jamais en silence
+            out[f.stem].update(stale_thresholds=True, warning=(
+                "seuils calcules par une version precedente de la calibration (ex aequo ignores, ou porte fixee sur les deux "
+                "reponses) : ignores, portes par defaut ; recalibrez ce classifieur (bouton Calibrer)"))
     return out
 
 
