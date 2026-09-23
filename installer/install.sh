@@ -226,7 +226,8 @@ ok "$APP"
 
 # ---- dependances ------------------------------------------------------------------------------------------------
 step "Environnement Python (uv sync, 1 a 3 minutes la premiere fois)"
-UV_PROJECT_ENVIRONMENT="$VENV" "$UV" sync --project "$APP" --extra studio --python "$PYTHON_VERSION" ||
+# --inexact : garde les paquets ajoutes a la main (ex. playwright pour l'outil navigateur) d'une mise a jour a l'autre
+UV_PROJECT_ENVIRONMENT="$VENV" "$UV" sync --inexact --project "$APP" --extra studio --python "$PYTHON_VERSION" ||
   die "uv sync a echoue (voir les messages ci-dessus)"
 if [ -n "$WEB_ZIP" ]; then
   "$VENV/bin/python" -m zipfile -e "$WEB_ZIP" "$APP/prophet_studio/web" || warn "extraction de l'interface echouee"

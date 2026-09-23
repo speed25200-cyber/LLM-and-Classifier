@@ -268,7 +268,7 @@ function Sync-Environment([string]$Uv, [string]$Data) {
     $env:UV_PROJECT_ENVIRONMENT = Join-Path $Data 'app-venv'
     try {
         Invoke-Native -FilePath $Uv -What 'uv sync' -Arguments @(
-            'sync', '--project', (Join-Path $Data 'app'), '--extra', 'studio', '--python', $PythonVersion)
+            'sync', '--inexact', '--project', (Join-Path $Data 'app'), '--extra', 'studio', '--python', $PythonVersion)
     } finally {
         $env:UV_PROJECT_ENVIRONMENT = $previous
     }

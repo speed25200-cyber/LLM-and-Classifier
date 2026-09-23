@@ -417,9 +417,8 @@ active mais indisponible n'est jamais propose a Bonsai (l'ecran Reglages dit pou
   puis `uv run playwright install chromium`. Sinon, l'ajouter a l'environnement Python de Studio (`<donnees>/app-venv` des
   scripts, `<donnees>/venv` de l'application de bureau), par exemple `uv pip install --python <python de cet environnement>
   playwright` puis `<python> -m playwright install chromium` (non essaye ici ; l'ecran Reglages dit si l'outil est
-  disponible). Un ajout a la main ne survit pas a une mise a jour par les scripts : ils relancent `uv sync --extra studio`,
-  qui retire tout paquet hors de ses extras (de meme `uv sync --extra studio` depuis les sources) ; le refaire apres chaque
-  mise a jour. L'application de bureau le garde (`uv run` ne retire rien).
+  disponible). Un ajout a la main survit aux mises a jour : les scripts lancent `uv sync --inexact`, qui ne retire rien
+  (depuis les sources, `uv sync` sans `--inexact` le retirerait) ; l'application de bureau le garde aussi (`uv run`).
 * **Bureau** (`desktop`, Windows seulement) : l'arbre **UI Automation** de la fenetre active (paquet `uiautomation`,
   installe par l'extra `studio` sous Windows) joue le role de l'arbre ARIA ; Bonsai a en plus `press_keys` et `open_app`.
 * L'appel de l'outil est juge comme les autres actions, puis chaque pas (section 5.5.12). Pas de capture d'ecran ni de
@@ -455,8 +454,8 @@ cd desktop && npm ci && npm run sidecar && npm run dev   # application de bureau
 reproductibles). La CI (`.github/workflows/ci.yml`) lance les tests Python sous Linux et Windows (Python 3.11, Chromium de
 Playwright), verifie et construit l'interface, et passe `cargo fmt` / `clippy` / `test` sur la coquille ; `desktop.yml`
 construit les paquets (NSIS + MSI sous Windows, deb + AppImage sous Linux, app + dmg sous macOS Apple Silicon) sur une
-etiquette `v*` (brouillon de release), un lancement manuel ou une modification de `desktop/`, `uv.lock` ou du workflow ;
-pas sur une modification de `jev_clone/` ou `prophet_studio/`, que les paquets embarquent pourtant.
+etiquette `v*` (brouillon de release), un lancement manuel ou une modification de ce que les paquets embarquent
+(`desktop/`, `jev_clone/`, `prophet_studio/`, `pyproject.toml`, `uv.lock`) ou du workflow.
 
 ## 10. Ce qui est verifie, ce qui ne l'est pas
 

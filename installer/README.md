@@ -32,9 +32,8 @@ Run workflow). Une fois une release publiee, page [Releases](https://github.com/
 * **macOS (Apple Silicon)** : `.dmg` ; application non notarisee : clic droit > Ouvrir au premier lancement.
 
 Artefacts : onglet **Actions** du depot, workflow **Bureau**, derniere execution reussie, section *Artifacts*
-(`prophet-studio-x86_64-pc-windows-msvc` contient le `.exe` et le `.msi`). Le workflow ne se relance que si `desktop/`,
-`uv.lock` ou `.github/workflows/desktop.yml` changent : une modification de `jev_clone/` ou `prophet_studio/`, que les
-paquets embarquent, ne reconstruit rien.
+(`prophet-studio-x86_64-pc-windows-msvc` contient le `.exe` et le `.msi`). Le workflow se relance a chaque modification
+de ce que les paquets embarquent (`desktop/`, `jev_clone/`, `prophet_studio/`, `pyproject.toml`, `uv.lock`).
 
 Le premier lancement prepare Python et les dependances (1 a 3 minutes, progression affichee), puis l'assistant
 prend le relais. Fermer la fenetre quitte Prophet Studio et libere la carte graphique.

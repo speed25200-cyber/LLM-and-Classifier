@@ -12,7 +12,8 @@ on:
     tags: ["v*"]
     branches: ["**"]
     # ignores pour les etiquettes : une etiquette v* construit toujours
-    paths: ["desktop/**", ".github/workflows/desktop.yml", "uv.lock"]
+    # le coeur Python (jev_clone, prophet_studio) et l'interface construite sont embarques dans les paquets
+    paths: ["desktop/**", ".github/workflows/desktop.yml", "uv.lock", "pyproject.toml", "jev_clone/**", "prophet_studio/**"]
 
 concurrency:
   group: desktop-${{ github.ref }}
