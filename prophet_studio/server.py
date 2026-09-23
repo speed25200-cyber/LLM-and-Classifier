@@ -126,6 +126,9 @@ class Studio:
         if (self.settings.get().autostart_models and self.runtime.state in ("stopped", "error")
                 and not self.recommended_missing_core() and not self.downloader_busy()):
             self.start_runtime()
+        elif self.runtime.can_attach_s1():
+            # Bonsai tourne seul (mode mono) et le classifieur vient d'arriver : il demarre sans relancer Bonsai
+            threading.Thread(target=self.runtime.attach_s1, daemon=True, name="runtime-s1").start()
 
     def downloader_busy(self) -> bool:
         return any(j.status in ("queued", "running", "verifying", "extracting") and j.group in ("runtime", self.plan().s2.model_id)
@@ -232,6 +235,11 @@ def build_app(studio: Studio) -> FastAPI:
         finally:
             metrics.cancel()
             studio.runtime.stop()
+            # core.json : retire ici, car sur SIGTERM uvicorn re-emet le signal apres l'arret et atexit ne tourne pas ;
+            # seulement s'il decrit ce processus (une autre instance a pu le reecrire)
+            with contextlib.suppress(Exception):
+                if json.loads(studio.paths.core_info.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                    studio.paths.core_info.unlink()
 
     app = FastAPI(title="Prophet Studio", version=__version__, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     origins = {f"http://127.0.0.1:{studio.port}", f"http://localhost:{studio.port}", "tauri://localhost", "http://tauri.localhost",
@@ -416,6 +424,8 @@ def build_app(studio: Studio) -> FastAPI:
             raise HTTPException(409, "les modeles ne sont pas demarres")
         try:
             return await asyncio.to_thread(studio.bench)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise HTTPException(503, f"un modele ne repond pas (arret ou redemarrage en cours, voir l'ecran Modeles) : {str(e)[:200]}")
         except Exception as e:
             raise HTTPException(500, str(e)[:300])
 
@@ -659,7 +669,19 @@ def build_app(studio: Studio) -> FastAPI:
         s1 = s1_or_none()
         if s1 is None:
             raise HTTPException(409, "le classifieur n'est pas demarre")
-        return (await asyncio.to_thread(s1.answer, req)).model_dump()
+        try:
+            out = (await asyncio.to_thread(s1.answer, req)).model_dump()
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise HTTPException(503, "System One ne repond pas (arret ou redemarrage en cours ; le superviseur bascule en mode mono "
+                                     f"si besoin), reessayez dans quelques secondes : {str(e)[:160]}")
+        except requests.HTTPError as e:
+            raise HTTPException(502, str(e)[:500])
+        # le modele qui a vraiment repondu : Bonsai en mode mono (URL du classifieur = celle de Bonsai)
+        rt = studio.runtime
+        out["mono"] = mono = getattr(s1.backend, "base_url", "") == rt.s2.url
+        sp = (rt.plan.s2 if mono else rt.plan.s1) if rt.plan else None
+        out["model"] = sp.model_id if sp is not None else out.get("model", "")
+        return out
 
     # ---- interface ------------------------------------------------------------------------------------------------------------
     boot = "<script>window.__PROPHET__=" + json.dumps({"token": studio.token, "api": "", "demo": studio.demo}) + "</script>"

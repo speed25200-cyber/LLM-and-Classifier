@@ -94,12 +94,18 @@ def main(argv=None) -> None:
     from prophet_studio.server import Studio, build_app
     studio = Studio(paths, token, port, demo=args.demo, dev=args.dev)
     app = build_app(studio)
-    if args.parent_pid:
-        _watch_parent(args.parent_pid, studio.runtime.stop)
 
+    def cleanup() -> None:
+        studio.runtime.stop()
+        paths.core_info.unlink(missing_ok=True)
+
+    if args.parent_pid:
+        _watch_parent(args.parent_pid, cleanup)   # suivi de os._exit : ni lifespan ni atexit
+
+    # sortie normale ; sur SIGTERM, uvicorn re-emet le signal apres l'arret (atexit ne tourne pas) : c'est alors le
+    # lifespan de l'application (server.build_app) qui arrete les modeles et retire core.json
     import atexit
-    atexit.register(studio.runtime.stop)
-    atexit.register(lambda: paths.core_info.unlink(missing_ok=True))
+    atexit.register(cleanup)
 
     print(f"Prophet Studio {'(demo) ' if args.demo else ''}-> {url}", flush=True)
     import uvicorn
