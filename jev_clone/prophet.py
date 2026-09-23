@@ -26,6 +26,7 @@ import ast
 import base64
 import difflib
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -37,6 +38,7 @@ import sys
 import time
 import types
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -118,7 +120,8 @@ LOAD_FLAGS = ("-r", "--require", "--import", "--loader", "--experimental-loader"
 WRITERS = ("cp", "mv", "ln", "install", "copy", "move", "copy-item", "move-item", "cpi", "mi")   # dernier argument ecrit
 TEE_LIKE = ("tee", "set-content", "add-content", "out-file", "sc", "ac")                  # tous les fichiers nommes ecrits
 EXEC_HINTS = re.compile(r"\b(?:exec|eval|compile|runpy|run_path|import_module|__import__|system|popen|spawn\w*|subprocess|execfile|"
-                        r"load_source|spec_from_file_location|source|iex|invoke-expression)\b|\$\(|`", re.IGNORECASE)
+                        r"load_source|spec_from_file_location|source|iex|invoke-expression|invoke-command|scriptblock|start-job|"
+                        r"add-type)\b|\$\(|`|(?:^|[;&|({]\s*)\.\s+(?:\.[\\/]|[^\s.|])", re.IGNORECASE)   # ... et dot-sourcing (`. .\\f`)
 JUDGE_CHUNK, JUDGE_OVERLAP = 2000, 300
 JUDGE_MAX_CHUNKS = 24   # ~40 k caracteres juges en entier pour un outil ; au-dela, arret humain obligatoire
 META_REFUSAL = ("the .prophet/ folder is managed by Prophet itself (tools, memory, journal): write elsewhere; "
@@ -167,6 +170,20 @@ def _executable(path: str, content: str = "") -> bool:
     n = parts[-1] if parts else ""
     return (_exec_name(n) or "." not in n.lstrip(".") or any(p in EXEC_DIRS for p in parts[:-1])
             or content.lstrip("\ufeff \t\r\n").startswith("#!"))
+
+
+EDIT_VIEW_MAX = JUDGE_CHUNK * 8   # au-dela, une retouche montre sa zone et non tout le fichier
+
+
+def _edit_view(after: str, new: str, around: int = 3000) -> str:
+    """Texte du fichier retouche montre au juge : entier s'il est court, sinon la zone du nouveau texte et son voisinage."""
+    if len(after) <= EDIT_VIEW_MAX:
+        return f"\n--- resulting file ({len(after)} chars) ---\n{after}"
+    i = after.find(new) if new else -1
+    i = max(i, 0)
+    a, b = max(0, i - around), min(len(after), i + len(new) + around)
+    return (f"\n--- resulting file around the edit (chars {a}-{b} of {len(after)}; the whole file is judged when a command runs it) ---\n"
+            + after[a:b])
 
 
 def _windows(s: str, chunk: int = JUDGE_CHUNK, overlap: int = JUDGE_OVERLAP) -> list[str]:
@@ -607,9 +624,23 @@ class Prophet:
         return j
 
     def _judge_one(self, request: str, proposed: str) -> dict:
-        # meme verdict que le garde par pas du computer use (jev_clone.guard) ; panne du clone : arret obligatoire
-        return judge_state(self._s1, {"user_request": _clip(request, 1200), "proposed_action": proposed}, self.danger_threshold,
-                           self.risk_confirm_level)
+        # meme verdict que le garde par pas du computer use (jev_clone.guard) ; panne du clone : arret obligatoire.
+        # Cache porte par le moteur S1 (reconstruit si le classifieur ou sa calibration change) : relancer le meme script
+        # ou rejuger un meme morceau ne coute plus de passe S1 (la lecture du clone est deterministe).
+        st = {"user_request": _clip(request, 1200), "proposed_action": proposed}
+        key = hashlib.sha256(json.dumps([st, self.danger_threshold, self.risk_confirm_level]).encode("utf-8", "replace")).hexdigest()
+        # seulement devant un vrai llama-server (lecture deterministe) : un moteur de test scenarise change de reponse
+        deterministic = type(getattr(self.s1, "backend", None)).__name__ == "LlamaCppBackend"
+        cache = self.s1.__dict__.setdefault("_judge_cache", OrderedDict()) if deterministic and hasattr(self.s1, "__dict__") else None
+        if cache is not None and key in cache:
+            cache.move_to_end(key)
+            return {**cache[key], "latency_ms": 0.0, "cached": True}
+        j = judge_state(self._s1, st, self.danger_threshold, self.risk_confirm_level)
+        if cache is not None and "s1_error" not in j:
+            cache[key] = dict(j)
+            while len(cache) > 512:
+                cache.popitem(last=False)
+        return j
 
     def _guarded(self, request: str, calls: list[dict], kind: str, describe: str, action: Callable[[], dict], record: dict,
                  judge: bool = True, preview: dict | None = None, force: dict | None = None) -> dict:
@@ -646,6 +677,9 @@ class Prophet:
         acc: dict = {"files": {}, "extra": [], "unseen": [], "meta": set(), "scanned": set()}
         if shell:
             self._scan(text, self.ws.root, acc, 0, True)
+            # evaluation indirecte dans la commande elle-meme (`Get-Content f | iex`, `eval $(cat f)`, `. .\\f`) : tout fichier
+            # du workspace qu'elle nomme est montre au juge, quel que soit son suffixe
+            self._code_refs(text, self.ws.root, acc)
         else:   # extrait Python : fichiers qu'il fait executer (exec(open(...)), subprocess, runpy...) et .prophet vise
             self._code_refs(text, self.ws.root, acc)
             for w in set(re.findall(r"[^\s'\"(),;|&<>`$={}\[\]]*[./\\][^\s'\"(),;|&<>`$={}\[\]]*", text)):
@@ -685,7 +719,7 @@ class Prophet:
     def _candidates(self, tok: str, base: Path | None, outside: bool = False) -> list[Path]:
         """Chemins qu'un mot de commande peut designer, relatif au repertoire courant suivi puis a la racine (les deux :
         un `cd` mal suivi ne substitue jamais un fichier a un autre). outside : chemins hors du workspace admis."""
-        t = tok.strip().strip("'\"").lstrip("@")
+        t = tok.strip().strip("'\"").lstrip("@").replace("\\", "/")   # chemins Windows (.\f, sub\f.txt) partout
         if not t or len(t) > 300 or _dynamic(t) or any(c in t for c in "\0\n*?"):
             return []
         if t.startswith("~"):
@@ -854,9 +888,11 @@ class Prophet:
                 text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
                 ok = bool(old) and (text.count(old) == 1 or (rep and old in text))
                 after = (text.replace(old, new) if rep else text.replace(old, new, 1)) if ok else ""
-                # le juge voit la modification ET le fichier qui en resulte (un contenu assemble en plusieurs retouches)
+                # le juge voit la modification ET le fichier qui en resulte (un contenu assemble en plusieurs retouches) ;
+                # fichier long : la zone modifiee et son voisinage (le fichier entier est juge quand une commande le lance),
+                # sans arret force ni une passe S1 par tranche de 1 700 caracteres a chaque retouche
                 return self._guarded(request, calls, "edit_file", f"edit {path}: replace\n{old}\n--- with ---\n{new}"
-                                     + (f"\n--- resulting file ({len(after)} chars) ---\n{after}" if ok else ""),
+                                     + (_edit_view(after, new) if ok else ""),
                                      lambda: ws.edit(path, old, new, rep), {"path": path}, judge=judge_write(path, after or new),
                                      preview={"old": old[:4000], "new": new[:4000]})
             r = ws.edit(path, old, new, rep); calls.append({"tool": "edit_file", "path": path, "ok": r.get("ok")}); return r
