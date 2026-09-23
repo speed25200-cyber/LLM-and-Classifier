@@ -7,6 +7,10 @@ Pour chaque branche on envoie UNE requete /completion avec :
   * samplers = [], temperature = 1.0  (aucun top-k / top-p / min-p : distribution brute du modele)
   * cache_prompt = true               (le prefixe d'etat partage est reutilise entre branches)
 
+Jamais plus de requetes en parallele que de slots du serveur (/props total_slots) : avec -np 1 (classifieur sur CPU),
+les branches passent en sequence sur le meme slot et reutilisent l'etat deja lu. Une erreur du serveur remonte avec
+son message (ex. depassement du contexte du slot) au lieu d'un simple "500 Server Error".
+
 Fonctionne avec le fork PrismML (Bonsai 2 : PTQ1_0 / PQ2_0) comme avec llama.cpp mainline
 (Bonsai 1-bit Q1_0, Ternary Q2_0_g64, Qwen3.5 GGUF...). Verifie contre un llama-server reel
 (build prism-b10683) : `completion_probabilities[0].top_probs = [{id, token, prob}, ...]`.
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -25,6 +30,23 @@ import requests
 
 from jev_clone.prompt import Branch, label_grammar
 from jev_clone.readout import probs_to_logits
+
+log = logging.getLogger(__name__)
+
+
+def raise_for_status(r: requests.Response) -> None:
+    """raise_for_status avec le message de llama-server : la vraie cause (contexte du slot depasse, grammaire...) remonte
+    jusqu'a l'interface (puce s1_error, erreur de tour) et au journal."""
+    if r.status_code < 400:
+        return
+    try:
+        err = r.json().get("error")
+        msg = (err.get("message") or err) if isinstance(err, dict) else (err or r.text)
+    except Exception:
+        msg = r.text
+    msg = " ".join(str(msg).split())[:400]
+    log.warning("llama-server %s sur %s : %s", r.status_code, r.url, msg)
+    raise requests.HTTPError(f"llama-server {r.status_code} : {msg}", response=r)
 
 
 @dataclass
@@ -68,6 +90,7 @@ class LlamaCppBackend:
         # publie (scale 0) tout en generant avec l'adaptateur (scale 1) sur le meme serveur.
         self.lora = lora
         self._session = requests.Session()
+        self._slots: int | None = None   # slots du serveur (-np), lus une fois sur /props
 
     def _with_lora(self, payload: dict) -> dict:
         if self.lora is not None:
@@ -77,8 +100,19 @@ class LlamaCppBackend:
     # ---- infos serveur -------------------------------------------------------------------
     def props(self) -> dict:
         r = self._session.get(f"{self.base_url}/props", timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         return r.json()
+
+    def slots(self) -> int:
+        """Nombre de slots du serveur (/props total_slots), lu une fois ; inconnu : max_workers (non memorise)."""
+        if self._slots is None:
+            try:
+                r = self._session.get(f"{self.base_url}/props", timeout=5)
+                r.raise_for_status()
+                self._slots = max(1, int(r.json().get("total_slots") or self.max_workers))
+            except Exception:
+                return self.max_workers
+        return self._slots
 
     def model_name(self) -> str:
         try:
@@ -98,7 +132,7 @@ class LlamaCppBackend:
         r = self._session.post(f"{self.base_url}/tokenize",
                                json={"content": text, "add_special": False, "parse_special": True},
                                timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         toks = r.json()["tokens"]
         return [t["id"] if isinstance(t, dict) else t for t in toks]
 
@@ -109,7 +143,7 @@ class LlamaCppBackend:
                                    "samplers": [], "temperature": 1.0, "grammar": grammar, "cache_prompt": True,
                                    "id_slot": self.id_slot})
         r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         d = r.json()
         cp = d.get("completion_probabilities") or []
         if not cp:
@@ -179,7 +213,7 @@ class LlamaCppBackend:
         payload = self._with_lora(payload)
         t0 = time.perf_counter()
         r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         d = r.json()
         ms = (time.perf_counter() - t0) * 1000.0
         cp = d.get("completion_probabilities") or []
@@ -193,17 +227,23 @@ class LlamaCppBackend:
                             cached_tokens=int(tm.get("cache_n", 0) or 0), ms=ms)
 
     def score_branches(self, prefix: str, branches: list[Branch]) -> list[BranchResult]:
-        """La 1re branche est envoyee seule (elle remplit le cache du prefixe), les autres en parallele
-        sur les slots du serveur (-np N) : chacune ne traite alors que sa propre branche."""
+        """La 1re branche est envoyee seule (elle remplit le cache du prefixe), les autres en parallele sur les slots
+        du serveur (-np N), jamais plus que ses slots : avec un seul slot (classifieur sur CPU), elles passent en sequence
+        et ne traitent que leur propre branche au lieu de re-preremplir l'etat sur d'autres slots."""
         if not branches:
             return []
-        first = self.score_branch(prefix, branches[0])
+        try:
+            first = self.score_branch(prefix, branches[0])
+        except requests.ConnectionError:
+            self._slots = None   # serveur arrete ou relance (peut-etre avec un autre -np) : on relira /props
+            raise
         rest = branches[1:]
         if not rest:
             return [first]
-        if self.max_workers <= 1:
+        workers = min(self.max_workers, self.slots()) if self.max_workers > 1 else 1
+        if workers <= 1:
             return [first] + [self.score_branch(prefix, b) for b in rest]
-        with cf.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+        with cf.ThreadPoolExecutor(max_workers=workers) as ex:
             out = list(ex.map(lambda b: self.score_branch(prefix, b), rest))
         return [first] + out
 
@@ -211,7 +251,7 @@ class LlamaCppBackend:
     def apply_template(self, messages: list[dict], **kw) -> str:
         """Rend les messages avec le gabarit de chat du modele (llama-server /apply-template)."""
         r = self._session.post(f"{self.base_url}/apply-template", json={"messages": messages, **kw}, timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         return r.json()["prompt"]
 
     def complete(self, prompt: str, n_predict: int = 256, stop: list[str] | None = None, temperature: float = 0.7,
@@ -224,7 +264,7 @@ class LlamaCppBackend:
             payload.update(extra)
         payload = self._with_lora(payload)
         r = self._session.post(f"{self.base_url}/completion", json=payload, timeout=self.timeout)
-        r.raise_for_status()
+        raise_for_status(r)
         d = r.json()
         return {"content": d.get("content", ""), "stop_type": d.get("stop_type", ""), "stopping_word": d.get("stopping_word", ""),
                 "tokens": int(d.get("tokens_predicted", 0) or 0), "timings": d.get("timings", {}) or {}}
@@ -268,8 +308,8 @@ class LlamaCppBackend:
             if r.status_code in (400, 500) and any(k in msg.lower() for k in ("context", "n_predict", "exceed", "n_ctx")) and payload["max_tokens"] > 64:
                 payload["max_tokens"] = max(64, payload["max_tokens"] // 4)
                 continue
-            r.raise_for_status()
-        r.raise_for_status()
+            raise_for_status(r)
+        raise_for_status(r)
         return r.json()
 
     @staticmethod

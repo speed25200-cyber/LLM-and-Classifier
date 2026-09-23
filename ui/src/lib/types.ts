@@ -309,3 +309,8 @@ export interface VoiceRoute {
   source: string;
   ms: number;
 }
+
+// ---- runtime : watchdog du superviseur (redemarrages automatiques depuis le dernier demarrage) ----
+export interface Runtime {
+  restarts?: { s1: number; s2: number };
+}

@@ -19,6 +19,7 @@ from prophet_studio.hardware import GPU, HardwareInfo
 CTX_STEPS = [131072, 98304, 65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096]
 PRIORITY_CTX_CAP = {"equilibre": 32768, "contexte": 131072, "vitesse": 16384}
 S1_CTX, S1_SLOTS, S1_KV = 8192, 4, "q8_0"
+S1_SLOTS_CPU = 1        # classifieur sur CPU : un seul slot, branches en sequence sur le meme cache (pas de re-prefill par slot)
 SAFETY_MIB = 256
 S2_LAYERS = 65          # 64 blocs + sortie (Bonsai 2 27B / Qwen3.8) : repere pour le dechargement partiel
 
@@ -133,12 +134,13 @@ def cpu_plan(hw: HardwareInfo, priority: str, s2_override: str = "auto", s1_over
     threads = max(1, min(hw.cpu_cores, 8))
     ctx = 8192 if ram >= 12 else 4096
     notes = [f"Pas de GPU NVIDIA exploitable : tout tourne sur le CPU ({hw.cpu_cores} coeurs, {ram:.0f} Gio de RAM).",
-             "Les deux modeles vivent en RAM ; comptez ~15-20 tok/s pour le 8B 1-bit sur 8 coeurs AVX2."]
+             "Les deux modeles vivent en RAM ; comptez ~15-20 tok/s pour le 8B 1-bit sur 8 coeurs AVX2.",
+             "Classifieur sur CPU (un slot) : ~0,15-0,4 s par decision une fois l'etat lu, plus le prefill d'un etat neuf (estimation)."]
     if s2m.id != "bonsai-8b-q1":
         notes.append("27B sur CPU : puissant mais lent (~3-6 tok/s) ; la priorite 'vitesse' repasse au 8B.")
     need = (s2m.weights_gib + s2m.overhead_gib + s1m.weights_gib + s1m.overhead_gib) * 1024 + kv_mib(s2m, ctx) + kv_mib(s1m, S1_CTX, S1_KV)
     return Plan("cpu", priority, ServerPlan("s2", s2m.id, "cpu", 0, ctx, 1, "q8_0", "off", 1024, threads),
-                ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS, S1_KV, threads=threads),
+                ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS_CPU, S1_KV, threads=threads),
                 {"ram_needed_mib": round(need), "ram_total_mib": round(ram * 1024)}, need < ram * 1024 * 0.85,
                 {"s2": {"tok_s": None, "basis": "CPU"}, "s1_ms": [150, 400]}, notes, title=f"CPU · {s2m.label}")
 
@@ -187,7 +189,7 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         ngl = max(0, min(99, int(room / per_layer)))
         notes.append(f"VRAM insuffisante pour {m.label} entier : {ngl} couches sur GPU, le reste sur CPU (plus lent).")
         s2 = ServerPlan("s2", m.id, "partial" if ngl > 0 else "cpu", ngl, 4096, 1, kv, "off", 1024, threads=hw.cpu_cores)
-        s1 = ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS, S1_KV, threads=hw.cpu_cores)
+        s1 = ServerPlan("s1", s1m.id, "cpu", 0, S1_CTX, S1_SLOTS_CPU, S1_KV, threads=hw.cpu_cores)
         budget = {"total": total, "other": other, **s2_mib(m, 4096, kv, False), "s2_weights": per_layer * ngl, "free": 0.0}
         return Plan(backend, priority, s2, s1, budget, False, {"s2": expected_speed(g, m, s2.device), "s1_ms": [150, 400]}, notes,
                     title=f"{g.name} · {m.label} (partiel)")
@@ -195,7 +197,7 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
     m, ctx, s1_gpu = chosen
     mm = "gpu" if mmproj_gpu else "cpu"
     s2 = ServerPlan("s2", m.id, "gpu", 99, ctx, 1, kv, mm if m.mmproj_pattern else "off", 2048 if m.thinking else -1)
-    s1 = ServerPlan("s1", s1m.id, "gpu" if s1_gpu else "cpu", 99 if s1_gpu else 0, S1_CTX, S1_SLOTS, S1_KV,
+    s1 = ServerPlan("s1", s1m.id, "gpu" if s1_gpu else "cpu", 99 if s1_gpu else 0, S1_CTX, S1_SLOTS if s1_gpu else S1_SLOTS_CPU, S1_KV,
                     threads=None if s1_gpu else max(2, min(hw.cpu_cores - 1, 8)))
     parts = s2_mib(m, ctx, kv, mmproj_gpu)
     if s1_gpu:
@@ -207,8 +209,10 @@ def make_plan(hw: HardwareInfo, priority: str = "equilibre", s2_override: str = 
         notes.append(f"{m.label} entierement sur GPU, cache KV {kv} ({ctx // 1024} k tokens de contexte).")
     else:
         notes.append(f"{m.label} : Bonsai 2 ne tient pas avec ce budget ({avail:.0f} Mio) ou la priorite 'vitesse' est choisie.")
-    notes.append("Classifieur (System One) sur GPU." if s1_gpu else
-                 "Classifieur (System One) sur CPU pour laisser le contexte au 27B : decisions ~0,1-0,3 s au lieu de ~0,05-0,15 s.")
+    notes.append("Classifieur (System One) sur GPU : ~0,05-0,15 s par decision (estimation GPU, 4 slots a KV unifie)." if s1_gpu else
+                 "Classifieur (System One) sur CPU pour laisser le contexte au 27B : un seul slot, questions en sequence sur le meme cache ; "
+                 "~0,1-0,3 s par decision une fois l'etat lu, plus la lecture d'un etat neuf (prefill CPU, ~0,5-1 s pour 2 k tokens). "
+                 "Estimations : mesurez avec le banc.")
     if mm == "cpu" and m.mmproj_pattern:
         notes.append("Vision : projecteur en RAM (--no-mmproj-offload) : -0,6 Gio de VRAM, images un peu plus lentes a lire.")
     if g.is_blackwell:
@@ -225,10 +229,12 @@ def degrade(plan: Plan, installed: set[str] | None = None) -> Plan | None:
     p = replace(plan, notes=list(plan.notes), rung=plan.rung + 1, fits=False)
     s2, s1 = replace(plan.s2), (replace(plan.s1) if plan.s1 else None)
     step = None
-    if s2.mmproj == "gpu":
+    if s2.np > 1:
+        s2.np, step = 1, "Bonsai repasse a un seul slot (mode mono)"
+    elif s2.mmproj == "gpu":
         s2.mmproj, step = "cpu", "projecteur vision deplace en RAM"
     elif s1 and s1.device == "gpu":
-        s1.device, s1.ngl, s1.threads, step = "cpu", 0, 4, "classifieur deplace sur CPU"
+        s1.device, s1.ngl, s1.np, s1.threads, step = "cpu", 0, S1_SLOTS_CPU, 4, "classifieur deplace sur CPU"
     elif s2.ctx > 8192:
         s2.ctx = next(c for c in CTX_STEPS if c < s2.ctx)
         step = f"contexte reduit a {s2.ctx // 1024} k"
@@ -247,3 +253,23 @@ def degrade(plan: Plan, installed: set[str] | None = None) -> Plan | None:
     p.notes.append(f"Memoire insuffisante au lancement -> {step}.")
     p.title = f"{plan.title.split(' · ')[0]} · {MODELS[s2.model_id].label} · {s2.ctx // 1024}k (ajuste)"
     return p
+
+
+def s1_on_cpu(plan: Plan) -> Plan:
+    """OOM du classifieur sur GPU : il passe directement sur CPU (un slot), sans consommer un cran de degrade() sur Bonsai
+    (deja charge : son plan ne change pas)."""
+    s1 = replace(plan.s1, device="cpu", ngl=0, np=S1_SLOTS_CPU, threads=plan.s1.threads or 4)
+    return replace(plan, s1=s1, budget={k: v for k, v in plan.budget.items() if not k.startswith("s1_")}, fits=False,
+                   expected={**plan.expected, "s1_ms": [100, 350]}, rung=plan.rung + 1,
+                   notes=[*plan.notes, "Memoire insuffisante pour le classifieur sur GPU -> classifieur deplace sur CPU (Bonsai inchange)."])
+
+
+def mono_plan(plan: Plan) -> Plan:
+    """Classifieur absent au lancement : Bonsai repond aussi aux questions System One (mode mono). Un 2e slot (KV unifie :
+    contexte entier par slot) evite que ces lectures evincent le cache de la conversation ou fassent la queue, si la memoire
+    le permet : RAM (Bonsai sur CPU) ou VRAM rendue par un classifieur prevu sur GPU. Sur 8 Go avec le classifieur prevu sur
+    CPU, aucune marge n'est prevue pour l'etat recurrent d'une 2e sequence du 27B hybride : on garde un slot."""
+    if plan.s2.np > 1 or not (plan.s2.device == "cpu" or (plan.s1 is not None and plan.s1.device == "gpu")):
+        return plan
+    return replace(plan, s2=replace(plan.s2, np=2),
+                   notes=[*plan.notes, "Classifieur absent : mode mono, Bonsai prend un 2e slot pour les decisions System One."])

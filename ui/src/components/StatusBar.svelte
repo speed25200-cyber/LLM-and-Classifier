@@ -34,7 +34,7 @@
         {#if used}<span class="mini" class:hot={used / plan.s2.ctx > 0.8}><i style="transform: scaleX({Math.min(1, used / plan.s2.ctx)})"></i></span>{/if}
       </span>
     {/if}
-    {#if app.core?.runtime.mono}<span class="it warn">mode mono</span>{/if}
+    {#if app.core?.runtime.mono}<span class="it warn" title={app.core.runtime.message || "Bonsai repond aussi aux decisions System One"}>mode mono</span>{/if}
     {#if dl.length}
       <button class="it dl" onclick={() => (app.view = "models")}>
         <span class="spinner"></span> {dl.length} telechargement{dl.length > 1 ? "s" : ""}{dlProgress != null ? ` · ${Math.round(dlProgress * 100)} %` : ""}
