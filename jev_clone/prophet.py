@@ -11,20 +11,26 @@ passe, a chaque tour, des *proprietes* de la demande :
     les jugements restent toujours disponibles ; au-dela de `max_tools`, seuls les plus pertinents sont exposes
   * `intent`, `language` : etiquettes d'observation (journal, entrainement), jamais un aiguillage
 Pendant la boucle, Bonsai consulte le clone (`judge_*`) ; chaque commande, code, nouvel outil, appel de competence,
-navigation web ou ecriture de fichier executable passe par le garde-fou du clone (risque d'outil, juge sur tout ce qui
-va s'executer) et, si l'action est risquee ou le verdict incertain, par votre confirmation. `.prophet/` n'est jamais
+navigation web ou ecriture de fichier (smart : toutes ; ask : celles qui peuvent s'executer) passe par le garde-fou
+du clone (risque d'outil, juge en entier par morceaux qui se chevauchent) et, si l'action est risquee ou le verdict
+incertain, par votre confirmation. Une commande montre au juge, au mieux, le code qu'elle lance (scripts passes a
+un interpreteur quel que soit leur suffixe, `python -m`, `-c`, `cd`, entree standard, hooks git) ; un script lance
+mais invisible (introuvable, reecrit par la commande) ou une commande qui vise `.prophet/skills` impose un arret
+humain. Toute autorisation « toujours » exclut les arrets obligatoires et les verdicts incertains. `.prophet/` n'est jamais
 ecrit par les outils de fichiers. Une voie directe ratee est reprise en voie agent. Tout tour est journalise.
 """
 
 from __future__ import annotations
 
 import ast
+import base64
 import difflib
 import fnmatch
 import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -34,7 +40,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from jev_clone.presets import GUARDRAILS, RISKY_TOOL_CLASSES, with_meta
+from jev_clone.guard import judge_state
+from jev_clone.presets import with_meta
 from jev_clone.tools import AgentLoop, SystemOneToolbox, _tool
 
 INTENTS = {"chat": "conversation or question", "create_app": "create an application, script, site or project", "modify_code": "change existing files",
@@ -76,10 +83,28 @@ CLAIMS_ACTION = re.compile(r"\bi(?:'ve| have)? (?:just )?(?:created|written|save
 CORE_TOOLS = ("done", "remember", "create_tool")   # toujours exposes, avec les judge_*
 BUILTIN_TOOLS = ("write_file", "edit_file", "read_file", "list_files", "glob", "grep", "run_command", "python", "browse",
                  "remember", "create_tool", "done", "desktop")   # une competence ne les remplace jamais
-# fichiers dont le contenu s'execute (ecrits : juges en mode smart ; lances par run_command : montres au juge)
-EXEC_SUFFIXES = (".py", ".pyw", ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".vbs",
-                 ".rb", ".pl", ".php")
-EXEC_NAMES = ("makefile", "package.json", "justfile")
+# fichiers dont le contenu s'execute (ecrits en mode ask : juges ; nommes par une commande : montres au juge). En mode
+# smart, toute ecriture est jugee : un .txt peut aussi finir execute (`python notes.txt`).
+EXEC_SUFFIXES = (".py", ".pyw", ".pth", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".fish", ".ksh", ".command",
+                 ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx", ".vbs", ".vbe", ".wsf", ".hta", ".rb", ".pl", ".php",
+                 ".lua", ".r", ".jl", ".go", ".java", ".kts", ".groovy", ".tcl", ".mk", ".applescript", ".scpt")
+EXEC_NAMES = ("makefile", "gnumakefile", "package.json", "justfile", "dockerfile", "rakefile", "gemfile", "vagrantfile", "procfile",
+              ".envrc", ".gitattributes", ".gitmodules", ".pre-commit-config.yaml", ".bashrc", ".bash_profile", ".profile", ".zshrc",
+              ".zshenv", ".npmrc", ".yarnrc", ".yarnrc.yml", "tox.ini", "setup.cfg", "pyproject.toml")
+EXEC_DIRS = (".git", ".githooks", ".husky", ".vscode", ".github")   # hooks, taches lancees a l'ouverture du dossier, CI
+# commandes : qui execute quoi (analyse au mieux ; le juge voit toujours la commande entiere)
+INTERPRETERS = ("python", "py", "pypy", "node", "nodejs", "deno", "bun", "tsx", "ts-node", "sh", "bash", "zsh", "dash", "ksh", "fish",
+                "pwsh", "powershell", "ruby", "perl", "php", "lua", "rscript", "julia", "source", ".", "osascript", "wscript", "cscript", "cmd")
+WRAPPERS = ("env", "nohup", "time", "timeout", "sudo", "doas", "exec", "nice", "command", "builtin", "xargs", "start", "call", "uv",
+            "uvx", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "npx", "bunx", "pnpx")
+VALUE_FLAGS = ("-W", "-X", "-o", "+o", "-O", "+O", "--title", "--inspect-port", "--env-file")   # option suivie d'une valeur
+LOAD_FLAGS = ("-r", "--require", "--import", "--loader", "--experimental-loader", "--rcfile", "--init-file")   # fichier charge
+WRITERS = ("cp", "mv", "ln", "install", "copy", "move", "copy-item", "move-item", "cpi", "mi")   # dernier argument ecrit
+TEE_LIKE = ("tee", "set-content", "add-content", "out-file", "sc", "ac")                  # tous les fichiers nommes ecrits
+EXEC_HINTS = re.compile(r"\b(?:exec|eval|compile|runpy|run_path|import_module|__import__|system|popen|spawn\w*|subprocess|execfile|"
+                        r"load_source|spec_from_file_location|source|iex|invoke-expression)\b|\$\(|`", re.IGNORECASE)
+JUDGE_CHUNK, JUDGE_OVERLAP = 2000, 300
+JUDGE_MAX_CHUNKS = 24   # ~40 k caracteres juges en entier pour un outil ; au-dela, arret humain obligatoire
 META_REFUSAL = ("the .prophet/ folder is managed by Prophet itself (tools, memory, journal): write elsewhere; "
                 "use create_tool to add a tool and remember to store a note")
 MUTATING_TOOLS = ("write_file", "edit_file", "run_command", "python", "create_tool", "browse", "desktop")
@@ -113,9 +138,152 @@ def _clip(x, n: int) -> str:
     return t if len(t) <= n else t[: n * 2 // 3] + " [...] " + t[-n // 3:]
 
 
-def _executable(path: str) -> bool:
+def _exec_name(path: str) -> bool:
+    """Suffixe ou nom de fichier executable connu."""
     n = Path(str(path).replace("\\", "/")).name.lower()
     return n.endswith(EXEC_SUFFIXES) or n in EXEC_NAMES
+
+
+def _executable(path: str, content: str = "") -> bool:
+    """Fichier dont le contenu peut s'executer : suffixe ou nom connu, sans extension (`sh run`, `./run`), sous .git/
+    (hooks) ou dossiers analogues, ou script #!."""
+    parts = [p.lower() for p in Path(str(path).replace("\\", "/")).parts]
+    n = parts[-1] if parts else ""
+    return (_exec_name(n) or "." not in n.lstrip(".") or any(p in EXEC_DIRS for p in parts[:-1])
+            or content.lstrip("\ufeff \t\r\n").startswith("#!"))
+
+
+def _windows(s: str, chunk: int = JUDGE_CHUNK, overlap: int = JUDGE_OVERLAP) -> list[str]:
+    """Fenetres qui se chevauchent d'au moins `overlap` caracteres : tout passage d'au plus `overlap` caracteres tient
+    entier dans une fenetre, et chaque coupe tombe en debut de ligne quand une ligne se termine assez pres."""
+    if len(s) <= chunk:
+        return [s]
+    out, i = [], 0
+    while i + chunk < len(s):
+        end = i + chunk
+        out.append(s[i:end])
+        nl = s.rfind("\n", i + chunk // 2, end - overlap)
+        i = nl + 1 if nl >= 0 else end - overlap
+    out.append(s[i:])
+    return out
+
+
+def _dynamic(tok: str) -> bool:
+    """Argument calcule a l'execution ($VAR, $(...), `...`, %VAR%) : son contenu est invisible pour le juge."""
+    return "$" in tok or "`" in tok or re.search(r"%\w+%", tok) is not None
+
+
+def _prog(tok: str) -> str:
+    """Nom de programme normalise : /usr/bin/python3.11 -> python, node.exe -> node."""
+    n = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    n = n[:-4] if n.endswith(".exe") else n
+    return re.sub(r"^(python|pypy)w?[\d.]*$", r"\1", n)
+
+
+def _is_punct(t: str) -> bool:
+    return bool(t) and set(t) <= set("();<>|&")
+
+
+def _segments(cmd: str) -> list[tuple[list[str], bool]]:
+    """Commande shell -> maillons [(mots, alimente par un tube)] ; separateurs ; && || & | ( ) $( et fins de ligne."""
+    text = (cmd.replace("\\", "/") if IS_WINDOWS else cmd).replace("\r", "")
+    try:
+        lx = shlex.shlex(text.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lx.whitespace_split = True
+        toks = list(lx)
+    except ValueError:   # guillemets desequilibres : decoupage simple
+        toks = [a or b or c for a, b, c in re.findall(r'"([^"]+)"|\'([^\']+)\'|([^\s"\']+)', text)]
+    segs: list[tuple[list[str], bool]] = []
+    cur: list[str] = []
+    piped = False
+    for t in toks:
+        if t == "$" or (_is_punct(t) and "<" not in t and ">" not in t):
+            if cur:
+                segs.append((cur, piped))
+                cur, piped = [], False
+            piped = piped or ("|" in t and "||" not in t)
+            continue
+        cur.append(t)
+    if cur:
+        segs.append((cur, piped))
+    return segs
+
+
+def _redirects(seg: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Maillon -> (mots, fichiers lus sur l'entree standard, fichiers ecrits par redirection)."""
+    words, stdin, outs, i = [], [], [], 0
+    while i < len(seg):
+        t = seg[i]
+        if _is_punct(t):   # < > >> 2> &> <<EOF <<< ...
+            target = seg[i + 1] if i + 1 < len(seg) else ""
+            if t in ("<", "0<"):
+                stdin.append(target)
+            elif ">" in t and "<" not in t:
+                outs.append(target)
+            i += 2
+            continue
+        words.append(t)
+        i += 1
+    return words, stdin, outs
+
+
+_CODE_LETTERS = {"python": "c", "pypy": "c", "py": "c", "sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "fish": "c",
+                 "perl": "eE", "ruby": "e", "node": "ep", "nodejs": "ep", "bun": "e", "lua": "e", "php": "r", "rscript": "e",
+                 "julia": "e", "tsx": "e", "ts-node": "e"}
+_PWSH_VALUE = ("-executionpolicy", "-ep", "-ex", "-windowstyle", "-w", "-win", "-inputformat", "-inp", "-if", "-outputformat", "-of",
+               "-o", "-version", "-v", "-configurationname", "-config", "-workingdirectory", "-wd", "-psconsolefile", "-settingsfile")
+
+
+def _interpreter_target(prog: str, rest: list[str]) -> tuple[str, str, list[str]]:
+    """Ce qu'un interpreteur execute : ("script", chemin) | ("code", texte) | ("module", nom) | ("encoded", base64) |
+    ("stdin", ""), plus les fichiers charges avant (node -r, ruby -r, bash --rcfile)."""
+    loads: list[str] = []
+    nxt = lambda j: rest[j + 1] if j + 1 < len(rest) else ""   # noqa: E731
+    if prog in ("source", "."):
+        return ("script", rest[0], loads) if rest else ("stdin", "", loads)
+    if prog == "cmd":
+        j = next((j for j, t in enumerate(rest) if t.lower() in ("/c", "/k", "/r")), None)
+        return ("code", " ".join(rest[j + 1:]), loads) if j is not None else ("stdin", "", loads)
+    j = 1 if prog in ("deno", "bun") and rest[:1] == ["run"] else 0
+    while j < len(rest):
+        t, tl = rest[j], rest[j].lower()
+        if prog in ("pwsh", "powershell"):
+            if tl in ("-encodedcommand", "-enc", "-ec", "-e", "-en"):
+                return "encoded", nxt(j), loads
+            if tl in ("-command", "-c", "-com"):
+                return "code", " ".join(rest[j + 1:]), loads
+            if tl in ("-file", "-f"):
+                return ("script", nxt(j), loads) if nxt(j) else ("stdin", "", loads)
+            if tl in _PWSH_VALUE:
+                j += 2
+                continue
+            if not t.startswith("-"):   # pwsh x.ps1 / pwsh Get-Item : une commande
+                return "code", " ".join(rest[j:]), loads
+            j += 1
+            continue
+        if t == "-":
+            return "stdin", "", loads
+        if t == "--":
+            return ("script", nxt(j), loads) if nxt(j) else ("stdin", "", loads)
+        if tl == "-m" and prog in ("python", "pypy", "py"):
+            return ("module", nxt(j), loads) if nxt(j) else ("stdin", "", loads)
+        if prog == "php" and tl == "-f":
+            return ("script", nxt(j), loads) if nxt(j) else ("stdin", "", loads)
+        letters = _CODE_LETTERS.get(prog, "")
+        if tl in ("--eval", "--print") or (letters and re.fullmatch(r"-[A-Za-z]+", t) and t[-1] in letters):
+            return "code", nxt(j), loads
+        if tl in LOAD_FLAGS and nxt(j):
+            loads.append(nxt(j))
+            j += 2
+            continue
+        if t in VALUE_FLAGS:
+            j += 2
+            continue
+        if t[:1] in ("-", "+") and len(t) > 1:
+            j += 1
+            continue
+        return "script", t, loads
+    return "stdin", "", loads
 
 
 def _skill_tool(source: str) -> dict:
@@ -399,10 +567,11 @@ class Prophet:
             self._s1_calls += 1
 
     # ---- garde-fou -----------------------------------------------------------------------------------------
-    def judge(self, request: str, proposed: str, chunk: int = 2000, max_chunks: int = 6) -> dict:
-        """Risque d'une action selon le clone. Une action longue est jugee en entier, par morceaux (le pire l'emporte) ;
-        au-dela de max_chunks, la partie non vue impose un arret humain."""
-        parts = [proposed[i:i + chunk] for i in range(0, len(proposed), chunk)] or [""]
+    def judge(self, request: str, proposed: str, chunk: int = JUDGE_CHUNK, max_chunks: int = 6, overlap: int = JUDGE_OVERLAP) -> dict:
+        """Risque d'une action selon le clone. Une action longue est jugee en entier, par morceaux qui se chevauchent (une
+        instruction coupee a une frontiere reste entiere dans l'un d'eux ; le pire l'emporte) ; au-dela de max_chunks, la
+        partie non vue impose un arret humain."""
+        parts = _windows(proposed, chunk, overlap)
         partial = len(parts) > max_chunks
         if partial:
             parts = parts[: max_chunks - 1] + parts[-1:]
@@ -422,32 +591,22 @@ class Prophet:
         return j
 
     def _judge_one(self, request: str, proposed: str) -> dict:
-        try:
-            r = self._s1({"state": {"user_request": _clip(request, 1200), "proposed_action": proposed},
-                          "questions": {"tool_risk": GUARDRAILS["tool_risk"], "risk": GUARDRAILS["risk"], "policy_violation": GUARDRAILS["policy_violation"]}})
-        except Exception as e:   # classifieur indisponible : prudence, on demande (et aucune autorisation memorisee ne vaut)
-            return {"s1_consulted": True, "tool_risk": "unknown", "tool_risk_conf": 0.0, "p_risky": 1.0, "risk": 2.0, "policy_violation": 0.0,
-                    "needs_confirmation": True, "hard_stop": True, "latency_ms": 0.0, "s1_error": str(e)[:200]}
-        a = r.answers
-        p_risky = sum(a["tool_risk"].probabilities.get(c, 0.0) for c in RISKY_TOOL_CLASSES)
-        j = {"s1_consulted": True, "tool_risk": a["tool_risk"].choice, "tool_risk_conf": a["tool_risk"].confidence,
-             "p_risky": round(p_risky, 4), "risk": a["risk"].score, "policy_violation": a["policy_violation"].noul}
-        # arret humain obligatoire, meme pour un outil « toujours autorise » : danger probable, politique, risque maximal
-        j["hard_stop"] = j["tool_risk"] in RISKY_TOOL_CLASSES or p_risky >= 0.5 or j["policy_violation"] >= 0.5 or j["risk"] >= 2.5
-        # incertitude : readonly + workspace_write doivent l'emporter avec une marge, l'argmax ne suffit pas
-        j["needs_confirmation"] = j["hard_stop"] or p_risky >= self.danger_threshold or j["risk"] >= self.risk_confirm_level - 0.5
-        j["latency_ms"] = r.latency_ms
-        return j
+        # meme verdict que le garde par pas du computer use (jev_clone.guard) ; panne du clone : arret obligatoire
+        return judge_state(self._s1, {"user_request": _clip(request, 1200), "proposed_action": proposed}, self.danger_threshold,
+                           self.risk_confirm_level)
 
     def _guarded(self, request: str, calls: list[dict], kind: str, describe: str, action: Callable[[], dict], record: dict,
-                 judge: bool = True, preview: dict | None = None) -> dict:
+                 judge: bool = True, preview: dict | None = None, force: dict | None = None) -> dict:
         """Politique d'autorisation. plan : toute action qui modifie est refusee. auto : jamais de question (le clone
         n'est pas consulte). smart : le clone juge l'action et on ne demande que si elle est risquee ou incertaine.
-        ask : on demande toujours. Le verdict passe a confirm() porte hard_stop (arret humain obligatoire)."""
+        ask : on demande toujours. Le verdict passe a confirm() porte hard_stop (arret humain obligatoire). force : raisons
+        d'un arret obligatoire trouvees hors du clone (code lance mais invisible, `.prophet/skills` vise)."""
         if self.plan_mode:
             calls.append({"tool": kind, **record, "blocked": True, "plan_mode": True})
             return {"ok": False, "blocked": True, "reason": "plan mode: no changes allowed; finish with done and a plan"}
-        judged = self.judge(request, describe) if judge and self.permission_mode != "auto" else None
+        judged = self.judge(request, describe, max_chunks=JUDGE_MAX_CHUNKS) if judge and self.permission_mode != "auto" else None
+        if judged is not None and force:
+            judged.update(force, needs_confirmation=True, hard_stop=True)
         log = {"judged": judged} if judged is not None else {"judged": None, "s1_consulted": False}
         ask = self.permission_mode == "ask" or (self.permission_mode == "smart" and judged is not None and judged["needs_confirmation"])
         if ask and not self.confirm(describe, {**(judged or {"s1_consulted": False}), "tool": kind, "preview": preview or {}}):
@@ -460,24 +619,185 @@ class Prophet:
         calls.append({"tool": kind, **record, "ok": r.get("ok") if isinstance(r, dict) else True, **log, **({"confirmed": True} if ask else {})})
         return r
 
-    def _scripts_of(self, cmd: str, max_files: int = 2, max_chars: int = 2400) -> str:
-        """Contenu (debut + fin, borne) des scripts du workspace qu'une commande lance : le juge voit ce qui va tourner,
-        pas seulement `python x.py`."""
-        out, seen = [], set()
-        for a, b, c in re.findall(r'"([^"]+)"|\'([^\']+)\'|([^\s;&|<>()`\'"]+)', cmd):
-            tok = (a or b or c).strip()
-            if not _executable(tok) or tok in seen:
-                continue
-            seen.add(tok)
+    # ---- ce qu'une commande ou un extrait va executer (analyse au mieux ; le juge voit toujours le texte entier) ----------
+    def _exec_context(self, text: str, shell: bool = True) -> tuple[str, dict]:
+        """-> (texte ajoute a la description jugee, raisons d'arret obligatoire pour _guarded). Chaque fichier que l'action
+        execute est montre en entier (le juge le decoupe ; au-dela de son budget, arret humain) : scripts passes a un
+        interpreteur quel que soit leur suffixe, fichiers executables nommes, `python -m`, code de `-c` / `-Command` /
+        `eval` (analyse a son tour), entree standard d'un interpreteur (`sh < f`, `cat f | sh`), hooks git, Makefile,
+        package.json, repertoire courant suivi (`cd`). Un script lance mais introuvable ou reecrit par la commande
+        elle-meme, ou une action qui vise `.prophet/skills`, impose un arret humain."""
+        acc: dict = {"files": {}, "extra": [], "unseen": [], "meta": set(), "scanned": set()}
+        if shell:
+            self._scan(text, self.ws.root, acc, 0, True)
+        else:   # extrait Python : fichiers qu'il fait executer (exec(open(...)), subprocess, runpy...) et .prophet vise
+            self._code_refs(text, self.ws.root, acc)
+            for w in set(re.findall(r"[^\s'\"(),;|&<>`$={}\[\]]*[./\\][^\s'\"(),;|&<>`$={}\[\]]*", text)):
+                self._meta_of(self._candidates(w, self.ws.root), acc)
+        if re.search(r"\.prophet", text, re.IGNORECASE):
+            acc["meta"].add("meta")
+        if re.search(r"\.prophet[\\/]+(?:\.[\\/]+)*skills", text, re.IGNORECASE):
+            acc["meta"].add("skills")
+        out = []
+        if acc["meta"]:
+            out.append("\n[note: this action touches .prophet/, Prophet's own folder (self-made tools loaded as code on later "
+                       "turns, memory, journal); tools are not supposed to write there]")
+        out += acc["extra"]
+        root = self.ws.root
+        for p in acc["files"]:
+            name = p.relative_to(root).as_posix() if root in p.parents else str(p)
+            out.append(f"\n--- content of {name} ---\n{self._file_text(p)}")
+        force: dict = {}
+        if acc["unseen"]:
+            force["unseen"] = list(dict.fromkeys(acc["unseen"]))[:20]
+        if "skills" in acc["meta"]:
+            force["meta_skills"] = True
+        return "".join(out), force
+
+    @staticmethod
+    def _file_text(p: Path) -> str:
+        """Contenu montre au juge : borne juste au-dessus de son budget (un fichier plus long le depasse : arret humain)."""
+        try:
+            with open(p, "rb") as f:
+                raw = f.read(JUDGE_CHUNK * JUDGE_MAX_CHUNKS + 1)
+        except OSError as e:
+            return f"(unreadable: {e})"
+        if b"\0" in raw[:8192]:
+            return f"(binary file, {p.stat().st_size} bytes: content not shown)"
+        return raw.decode("utf-8", errors="replace")
+
+    def _candidates(self, tok: str, base: Path | None, outside: bool = False) -> list[Path]:
+        """Chemins qu'un mot de commande peut designer, relatif au repertoire courant suivi puis a la racine (les deux :
+        un `cd` mal suivi ne substitue jamais un fichier a un autre). outside : chemins hors du workspace admis."""
+        t = tok.strip().strip("'\"").lstrip("@")
+        if not t or len(t) > 300 or _dynamic(t) or any(c in t for c in "\0\n*?"):
+            return []
+        if t.startswith("~"):
+            t = os.path.expanduser(t)
+        root, out = self.ws.root, []
+        for b in ([base] if base is not None and base != root else []) + [root]:
             try:
-                p = self.ws.resolve(tok)
-            except (PermissionError, OSError, ValueError):   # hors du workspace : la commande elle-meme est jugee
+                p = (b / t).resolve()
+            except (OSError, ValueError, RuntimeError):
                 continue
-            if p.is_file():
-                out.append(f"\n--- content of {tok} ---\n" + _clip(p.read_text(encoding="utf-8", errors="replace"), max_chars))
-                if len(out) >= max_files:
-                    break
-        return "".join(out)
+            if p not in out and (outside or p == root or root in p.parents):
+                out.append(p)
+        return out
+
+    def _meta_of(self, paths: list[Path], acc: dict) -> None:
+        def under(p: Path, d: Path) -> bool:   # casse ignoree (Windows, macOS), comme Workspace.in_meta
+            s, m = str(p).casefold(), str(d).casefold()
+            return s == m or s.startswith(m + os.sep)
+        for p in paths:
+            if under(p, self.ws.meta):
+                acc["meta"].add("skills" if under(p, self.ws.skills_dir) else "meta")
+
+    def _add(self, paths: list[Path], acc: dict) -> list[Path]:
+        found = [p for p in paths if p.is_file()]
+        for p in found:
+            acc["files"].setdefault(p, True)
+        return found
+
+    def _code_refs(self, code: str, base: Path | None, acc: dict) -> None:
+        """Code qui execute d'autres fichiers (exec, eval, subprocess, runpy, $(...), iex...) : les fichiers du workspace
+        qu'il nomme sont montres aussi (`exec(open('notes.txt').read())`, `os.system('sh run')`)."""
+        if not EXEC_HINTS.search(code):
+            return
+        for w in dict.fromkeys(re.findall(r"[^\s'\"(),;|&<>`$={}\[\]]+", code)):
+            self._add(self._candidates(w, base), acc)
+
+    def _scan(self, cmd: str, base: Path | None, acc: dict, depth: int, strict: bool) -> None:
+        """Analyse d'une commande shell, maillon par maillon. strict : un script lance mais invisible est signale (faux
+        pour un simple texte entre guillemets, un message de commit par exemple, analyse seulement pour montrer plus)."""
+        if depth > 3 or not cmd.strip() or (cmd, strict) in acc["scanned"]:
+            return
+        acc["scanned"].add((cmd, strict))
+        root = self.ws.root
+        written: list[Path] = []      # cibles ecrites par la commande elle-meme (cp, mv, tee, >)
+        pipe_files: list[str] = []    # arguments des maillons precedents du tube (cat f | sh)
+        for seg, piped in _segments(cmd):
+            if not piped:
+                pipe_files = []
+            words, stdin, outs = _redirects(seg)
+            for o in outs:
+                written += self._candidates(o, base, outside=True)
+            for t in words + stdin + outs:
+                cands = self._candidates(t, base)
+                self._meta_of(cands, acc)
+                if _exec_name(t):
+                    self._add(cands, acc)
+                if any(c.isspace() for c in t) or set(t) & set(";|&`$"):   # texte entre guillemets : peut-etre une commande
+                    self._scan(t, base, acc, depth + 1, False)
+            k = 0   # programme : on saute VAR=x, env, sudo, timeout 60, uv run, npx, xargs -I{}...
+            while k < len(words) and (re.fullmatch(r"\w+=.*", words[k]) or _prog(words[k]) in WRAPPERS):
+                k += 1
+                if _prog(words[k - 1]) in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda") and k < len(words) and words[k] in ("run", "exec"):
+                    k += 1
+                while k < len(words) and (words[k][:1] == "-" or re.fullmatch(r"\d+[smhd]?", words[k])):
+                    k += 1
+            if k >= len(words):
+                continue
+            prog, rest = _prog(words[k]), words[k + 1:]
+            args = [t for t in rest if t[:1] != "-"]
+            if prog in ("cd", "pushd", "chdir", "set-location", "sl"):
+                arg = next((t for t in args if t.lower() != "/d"), "")
+                if not arg or _dynamic(arg) or arg == "-" or arg.startswith("~"):
+                    base = None
+                else:
+                    c = self._candidates(arg, base, outside=True)
+                    base = c[0] if c and (c[0] == root or root in c[0].parents) else None   # hors du workspace : inconnu
+                    self._meta_of(c[:1], acc)
+                continue
+            if prog == "git":   # hooks du depot : lances par commit, merge, checkout...
+                for b in dict.fromkeys([base or root, root]):
+                    d = b / ".git" / "hooks"
+                    if d.is_dir():
+                        self._add([f for f in sorted(d.iterdir()) if not f.name.endswith(".sample")], acc)
+            elif prog in ("make", "gmake", "just"):
+                files = [rest[j + 1] for j, t in enumerate(rest[:-1]) if t in ("-f", "--file", "--makefile", "--justfile")]
+                for n in files or ["GNUmakefile", "makefile", "Makefile", "justfile", "Justfile", ".justfile"]:
+                    self._add(self._candidates(n, base), acc)
+            elif prog in ("npm", "yarn", "pnpm") or (prog in ("bun", "deno") and rest[:1] and rest[0] in ("run", "task", "test", "x", "install", "i", "add")):
+                for n in ("package.json", "deno.json", "deno.jsonc"):
+                    self._add(self._candidates(n, base), acc)
+            if prog in INTERPRETERS or prog in ("eval", "iex", "invoke-expression"):
+                kind, val, loads = ("code", " ".join(rest), []) if prog in ("eval", "iex", "invoke-expression") else _interpreter_target(prog, rest)
+                for f in loads:
+                    self._scan(f, base, acc, depth + 1, strict)   # node -r ./hook.js : un programme de plus
+                if kind == "script":
+                    found = self._add(self._candidates(val, base, outside=True), acc)
+                    stale = [p for p in found if any(p == w or w in p.parents for w in written)]
+                    if strict and (stale or (not found and (_dynamic(val) or _exec_name(val) or val.startswith(("./", "../", ".\\", "..\\"))))):
+                        acc["unseen"].append(val)
+                elif kind == "module":
+                    if strict and _dynamic(val):
+                        acc["unseen"].append(f"-m {val}")
+                    parts = val.split(".")
+                    rels = ["/".join(parts[:i]) + "/__init__.py" for i in range(1, len(parts) + 1)]
+                    self._add([p for r in rels + ["/".join(parts) + ".py", "/".join(parts) + "/__main__.py"] for p in self._candidates(r, base)], acc)
+                elif kind == "code":
+                    self._scan(val, base, acc, depth + 1, strict)
+                    self._code_refs(val, base, acc)
+                elif kind == "encoded":
+                    try:
+                        dec = base64.b64decode(val, validate=True).decode("utf-16-le")
+                    except Exception:
+                        if strict:
+                            acc["unseen"].append("-EncodedCommand")
+                    else:
+                        acc["extra"].append(f"\n--- decoded -EncodedCommand ---\n{dec}")
+                        self._scan(dec, base, acc, depth + 1, strict)
+                else:   # entree standard : fichier redirige ou envoye par le tube
+                    for f in stdin + (pipe_files if piped else []):
+                        self._add(self._candidates(f, base, outside=True), acc)
+            else:   # programme du workspace (./run, bin/outil) : son contenu s'execute
+                self._add(self._candidates(words[k], base), acc)
+            if prog in WRITERS and len(args) >= 2:
+                written += self._candidates(args[-1], base, outside=True)
+            elif prog in TEE_LIKE:
+                for a in args:
+                    written += self._candidates(a, base, outside=True)
+            pipe_files += rest + stdin
 
     def _skill(self, request: str, calls: list[dict], name: str, skill: Skill) -> Callable:
         """Appel d'une competence creee par Prophet : garde-fou comme run_command, le juge voit les arguments et le code."""
@@ -491,8 +811,10 @@ class Prophet:
     def _catalog(self, request: str, calls: list[dict]) -> dict[str, tuple[dict, Callable]]:
         ws = self.ws
 
-        def guard_write(exe: bool) -> bool:   # smart : seuls les fichiers executables sont juges (python x.py suivra)
-            return self.permission_mode == "ask" or self.plan_mode or (exe and self.permission_mode == "smart")
+        def judge_write(path: str, content: str) -> bool:
+            # smart : toute ecriture est jugee sur son contenu entier (un .txt ou un hook git peut etre lance plus tard) ;
+            # ask : l'humain voit tout, le clone juge ce qui peut s'executer (autorisation par classe de risque)
+            return self.permission_mode == "smart" or _executable(path, content)
         def meta_refused(tool: str, path: str) -> dict:   # .prophet/skills/*.py serait execute aux tours suivants
             calls.append({"tool": tool, "path": path, "ok": False, "blocked": True, "meta": True})
             return {"ok": False, "blocked": True, "error": META_REFUSAL}
@@ -500,30 +822,38 @@ class Prophet:
             path, content = a["path"], a["content"]
             if ws.in_meta(path):
                 return meta_refused("write_file", path)
-            exe = _executable(path)
-            if guard_write(exe):
+            if self.plan_mode or self.permission_mode != "auto":
                 before = ws.resolve(path).read_text(encoding="utf-8", errors="replace") if ws.resolve(path).exists() else ""
-                return self._guarded(request, calls, "write_file", f"write {path} ({len(content)} chars)" + (f":\n{content}" if exe else ""),
-                                     lambda: ws.write_with_diff(path, content), {"path": path}, judge=exe,
+                return self._guarded(request, calls, "write_file", f"write {path} ({len(content)} chars):\n{content}",
+                                     lambda: ws.write_with_diff(path, content), {"path": path}, judge=judge_write(path, content),
                                      preview={"diff": ws._diff(path, before, content)})
             r = ws.write_with_diff(path, content); calls.append({"tool": "write_file", "path": path, "ok": r.get("ok")}); return r
         def edit_file(a):
             path, old, new, rep = a["path"], a.get("old_string", ""), a.get("new_string", ""), bool(a.get("replace_all", False))
             if ws.in_meta(path):
                 return meta_refused("edit_file", path)
-            exe = _executable(path)
-            if guard_write(exe):
-                return self._guarded(request, calls, "edit_file", f"edit {path}" + (f": replace\n{old}\n--- with ---\n{new}" if exe else ""),
-                                     lambda: ws.edit(path, old, new, rep), {"path": path}, judge=exe, preview={"old": old[:4000], "new": new[:4000]})
+            if self.plan_mode or self.permission_mode != "auto":
+                p = ws.resolve(path)
+                text = p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+                ok = bool(old) and (text.count(old) == 1 or (rep and old in text))
+                after = (text.replace(old, new) if rep else text.replace(old, new, 1)) if ok else ""
+                # le juge voit la modification ET le fichier qui en resulte (un contenu assemble en plusieurs retouches)
+                return self._guarded(request, calls, "edit_file", f"edit {path}: replace\n{old}\n--- with ---\n{new}"
+                                     + (f"\n--- resulting file ({len(after)} chars) ---\n{after}" if ok else ""),
+                                     lambda: ws.edit(path, old, new, rep), {"path": path}, judge=judge_write(path, after or new),
+                                     preview={"old": old[:4000], "new": new[:4000]})
             r = ws.edit(path, old, new, rep); calls.append({"tool": "edit_file", "path": path, "ok": r.get("ok")}); return r
         def run_command(a):
             cmd = a["command"]
-            return self._guarded(request, calls, "run_command", f"shell: {cmd}" + self._scripts_of(cmd), lambda: ws.run(cmd, timeout=self.command_timeout),
-                                 {"command": cmd}, preview={"command": cmd})
+            shown, force = self._exec_context(cmd)
+            return self._guarded(request, calls, "run_command", f"shell: {cmd}" + shown, lambda: ws.run(cmd, timeout=self.command_timeout),
+                                 {"command": cmd}, preview={"command": cmd}, force=force)
         def python(a):
             code = a["code"]
-            return self._guarded(request, calls, "python", f"python code:\n{code}",
-                                 lambda: ws.run_python(code, timeout=self.command_timeout), {"code": code[:200]}, preview={"code": code[:6000]})
+            shown, force = self._exec_context(code, shell=False)
+            return self._guarded(request, calls, "python", f"python code:\n{code}" + shown,
+                                 lambda: ws.run_python(code, timeout=self.command_timeout), {"code": code[:200]}, preview={"code": code[:6000]},
+                                 force=force)
         def create_tool(a):
             name, desc, params, body = a["name"], a["description"], a.get("parameters") or {"type": "object", "properties": {}}, a["python_body"]
             if not name.isidentifier() or name in BUILTIN_TOOLS or name.startswith(("judge_", "broken_")):

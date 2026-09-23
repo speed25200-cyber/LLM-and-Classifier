@@ -3,7 +3,7 @@
   import { app } from "../lib/store.svelte";
   import { alwaysAllow, api } from "../lib/api";
   import { highlight, langFromPath } from "../lib/markdown";
-  import { grantLabel } from "./PermissionCard.svelte";
+  import { grantInert, grantLabel } from "./PermissionCard.svelte";
 
   interface Node { name: string; path: string; dir: boolean; children: Node[] }
   let entries = $state<string[]>([]);
@@ -136,8 +136,8 @@
         {#if grants.length > 1}<button class="btn ghost sm" onclick={() => revoke()}>Tout revoquer</button>{/if}
       </div>
       {#each grants as g (g)}
-        <div class="grant">
-          <span class="gl" title={g}>{grantLabel(g)}</span>
+        <div class="grant" class:inert={grantInert(g)}>
+          <span class="gl" title={grantInert(g) ? `${g} : ne s'applique plus (arret obligatoire ou pas toujours juge)` : g}>{grantLabel(g)}</span>
           <button class="icon-btn" title="Revoquer : redemander a chaque fois" aria-label="Revoquer {grantLabel(g)}" onclick={() => revoke(g)}><X size={13} /></button>
         </div>
       {/each}
@@ -174,6 +174,7 @@
   .gh .panel-title { display: inline-flex; align-items: center; gap: 6px; }
   .grant { display: flex; align-items: center; gap: 6px; height: 27px; font-size: 12px; color: var(--text-2); }
   .gl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grant.inert .gl { color: var(--text-4); text-decoration: line-through; }
   .grant .icon-btn { width: 24px; height: 24px; }
   .foot { font-size: 10.5px; padding: 6px 14px; border-top: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

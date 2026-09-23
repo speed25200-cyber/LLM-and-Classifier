@@ -16,6 +16,7 @@ from typing import Callable
 from jev_clone.backend_llamacpp import LlamaCppBackend
 from jev_clone.engine import SystemOneEngine
 from jev_clone.desktop_use import make_desktop_factory
+from jev_clone.guard import grant_for
 from jev_clone.prophet import Prophet, Workspace, make_browser_factory
 from jev_clone.readout import Calibration
 
@@ -200,20 +201,21 @@ class AgentService:
         def confirm(describe: str, judged: dict) -> bool:
             tool = judged.get("tool", "action")
             # « toujours » vaut pour un couple (outil, classe de risque jugee par S1) ; sans jugement, pour l'outil seul.
-            # Un arret obligatoire (dangereux probable, politique, S1 en panne, action vue en partie) demande toujours.
-            grant = f"{tool}:{judged['tool_risk']}" if judged.get("s1_consulted") and judged.get("tool_risk") else tool
-            hard = bool(judged.get("hard_stop"))
-            if not hard and grant in session.get("always_allow", []):
+            # Jamais pour un arret obligatoire (dangereux probable, politique, S1 en panne, action vue en partie, code
+            # invisible) ni pour un verdict incertain : une autorisation ne couvre que ce que le mode smart aurait laisse
+            # passer sans demander (jev_clone.guard.grant_for). Vaut aussi pour les pas du computer use (desktop_step...).
+            grant = grant_for(tool, judged)
+            if grant is not None and grant in session.get("always_allow", []):
                 return True
             pp = PendingPermission(sid, tool)
             self.permissions[pp.id] = pp
             emit({"type": "permission.request", "id": pp.id, "tool": tool, "describe": describe[:4000], "preview": judged.get("preview"),
-                  "judged": {**{k: v for k, v in judged.items() if k not in ("preview",)}, "grant": None if hard else grant}})
+                  "judged": {**{k: v for k, v in judged.items() if k not in ("preview",)}, "grant": grant}})
             while not pp.event.wait(0.25):
                 if cancel.is_set():
                     break
             self.permissions.pop(pp.id, None)
-            remembered = pp.allow and pp.remember and not hard
+            remembered = pp.allow and pp.remember and grant is not None
             if remembered and grant not in session.setdefault("always_allow", []):
                 session["always_allow"].append(grant)
             emit({"type": "permission.resolved", "id": pp.id, "allow": pp.allow, "remember": remembered, "grant": grant if remembered else None})

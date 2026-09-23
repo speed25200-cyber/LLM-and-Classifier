@@ -74,8 +74,10 @@ def main(argv=None):
         from jev_clone.prophet import Prophet, Workspace, confirm_in_terminal, make_browser_factory, repl
         s1 = SystemOneEngine(LlamaCppBackend(args.s1, max_workers=4), calibration=Calibration.load(args.calibration))
         s2 = LlamaCppBackend(args.s2, max_workers=1, timeout=600)
-        repl(Prophet(s1, s2, Workspace(args.workspace), confirm=(lambda c, j: True) if args.yes else confirm_in_terminal,
-                     browser_factory=make_browser_factory(s1, s2) if args.browser else None))
+        # une seule autorisation pour les outils et pour chaque pas risque du navigateur (sans elle, tout pas risque est refuse)
+        confirm = (lambda c, j: True) if args.yes else confirm_in_terminal
+        repl(Prophet(s1, s2, Workspace(args.workspace), confirm=confirm,
+                     browser_factory=make_browser_factory(s1, s2, confirm=confirm) if args.browser else None))
         return
 
     if args.cmd == "decide":

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from jev_clone.presets import GUARDRAILS, RISKY_TOOL_CLASSES
+from jev_clone.guard import JUDGE_QUESTIONS, judge_state
 from jev_clone.tools import AgentLoop, SystemOneToolbox, _tool
 
 ACTIONS = {
@@ -51,7 +51,7 @@ BROWSER_HINT = "uv pip install playwright && playwright install chromium"
 ACTION_Q = {"type": "choice", "instructions": "What is the best next action to progress toward the goal?", "criteria": dict(ACTIONS)}
 ACHIEVED_Q = {"type": "noul", "instructions": "Is the goal already fully achieved in the current state (nothing left to do)?"}
 # garde-fou par pas : memes questions que le juge des outils de Prophet (tool_risk, risk, policy_violation)
-STEP_RISK = {k: GUARDRAILS[k] for k in ("tool_risk", "risk", "policy_violation")}
+STEP_RISK = JUDGE_QUESTIONS
 GUARDED_ACTIONS = ("click", "type", "press_keys", "open_app")
 FIELD_ROLES = ("input", "textarea", "textbox", "searchbox", "combobox", "document")
 
@@ -362,23 +362,15 @@ class StepGuard:
         st: dict[str, Any] = {"user_request": goal[:1200], "proposed_action": describe}
         if state is not None:
             st["where"] = {"url": state.url, "title": state.title}
-        try:
-            r = self.engine.answer({"state": st, "questions": STEP_RISK})
-        except Exception as e:
-            return {"tool_risk": "unknown", "tool_risk_conf": 0.0, "risk": 2.0, "policy_violation": 0.0, "needs_confirmation": True,
-                    "latency_ms": 0.0, "s1_error": str(e)[:200], "describe": describe}
-        a = r.answers
-        # meme regle que le juge des outils de Prophet : la masse de probabilite risquee compte, pas seulement l'argmax
-        p_risky = sum(a["tool_risk"].probabilities.get(c, 0.0) for c in RISKY_TOOL_CLASSES)
-        j = {"tool_risk": a["tool_risk"].choice, "tool_risk_conf": a["tool_risk"].confidence, "p_risky": round(p_risky, 4),
-             "risk": a["risk"].score, "policy_violation": a["policy_violation"].noul}
-        j["needs_confirmation"] = (j["tool_risk"] in RISKY_TOOL_CLASSES or p_risky >= self.danger_threshold
-                                   or j["risk"] >= self.risk_level - 0.5 or j["policy_violation"] >= 0.5)
-        j["latency_ms"], j["describe"] = r.latency_ms, describe
+        # meme verdict que le juge des outils de Prophet (jev_clone.guard) : s1_consulted, masse risquee, hard_stop ; clone
+        # en panne -> arret obligatoire. Une autorisation « toujours » ne vaut donc jamais pour un pas dangereux ou incertain.
+        j = judge_state(self.engine.answer, st, self.danger_threshold, self.risk_level)
+        j["describe"] = describe
         return j
 
     def check(self, goal: str, action: dict, state: PageState | None, judged: dict | None = None) -> dict:
-        """-> {"allowed": bool, "judged": dict, "reason"?: str}. Ne demande a l'humain que si le pas est juge risque."""
+        """-> {"allowed": bool, "judged": dict, "reason"?: str}. Ne demande a l'humain que si le pas est juge risque.
+        confirm_called : confirm a ete consulte (il peut avoir repondu sans montrer la demande)."""
         j = judged or self.judge(goal, action, state)
         if not j["needs_confirmation"]:
             return {"allowed": True, "judged": j}
@@ -389,7 +381,7 @@ class StepGuard:
             ok = bool(self.confirm(f"{self.kind} step: {j['describe']}", {**j, "tool": f"{self.kind}_step", "preview": {"command": j["describe"]}}))
         except Exception:
             ok = False
-        return {"allowed": ok, "judged": j, "asked": True, **({} if ok else {"reason": "the user declined this step"})}
+        return {"allowed": ok, "judged": j, "confirm_called": True, **({} if ok else {"reason": "the user declined this step"})}
 
 
 class SlowPolicy:
