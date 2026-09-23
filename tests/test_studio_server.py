@@ -191,3 +191,22 @@ def test_supervisor_steps_down_on_oom(tmp_path, monkeypatch):
         assert any(e["type"] == "runtime.degraded" for e in events)
     finally:
         rt.stop()
+
+
+def test_models_start_by_themselves_once_installed(tmp_path, monkeypatch):
+    """Installer = pouvoir utiliser : quand le runtime et Bonsai arrivent, le superviseur demarre seul."""
+    monkeypatch.setenv("PROPHET_FAKE_GPU", "NVIDIA GeForce RTX 5060:8151:650")
+    paths = Paths(tmp_path / "home")
+    paths.settings.write_text(json.dumps({"s2_port": free_port(), "s1_port": free_port(), "voice": {"enabled": False}}))
+    st = Studio(paths, TOKEN, 7878)
+    started = []
+    st.start_runtime = lambda: started.append(True)
+    assert st.recommended_missing_core()
+    import sys as _sys
+    model = tmp_path / "b.gguf"; model.touch()
+    st.installer.registry["runtime"] = {"server": _sys.executable, "tag": "t", "backend": "cpu"}
+    st.installer._save()
+    assert started == []                                   # Bonsai manque encore
+    st.installer.registry["models"][st.plan().s2.model_id] = {"main": str(model), "role": "s2"}
+    st.installer._save()
+    assert started == [True]

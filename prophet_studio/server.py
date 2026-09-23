@@ -66,6 +66,7 @@ class Studio:
         self.started = time.time()
         if demo:
             self._prepare_demo()
+        self.installer.on_change = self._autostart_after_install   # apres la preparation : pas de double demarrage
 
     @staticmethod
     def _demo_desktop():
@@ -111,6 +112,16 @@ class Studio:
                       "gpu": self.hw.gpu.name if self.hw.gpu else "", "ts": time.time()}
         f.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.bus.publish({"type": "runtime.calibrated", "model": m.id, "used_mib": round(used_mib), "overhead_mib": round(over)})
+
+    def _autostart_after_install(self) -> None:
+        """Des que le runtime et Bonsai sont la, les modeles demarrent seuls : installer = pouvoir utiliser."""
+        if (self.settings.get().autostart_models and self.runtime.state in ("stopped", "error")
+                and not self.recommended_missing_core() and not self.downloader_busy()):
+            self.start_runtime()
+
+    def downloader_busy(self) -> bool:
+        return any(j.status in ("queued", "running", "verifying", "extracting") and j.group in ("runtime", self.plan().s2.model_id)
+                   for j in self.downloader.jobs.values())
 
     def server_cmd(self) -> list[str] | None:
         if self.demo:

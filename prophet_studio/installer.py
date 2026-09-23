@@ -139,6 +139,7 @@ class Installer:
         self.http = http or requests.Session()
         self._lock = threading.Lock()
         self.registry = self._load()
+        self.on_change: Callable[[], None] | None = None   # rappel apres chaque installation (demarrage automatique)
 
     # ---- registre ------------------------------------------------------------------------------------------------
     def _load(self) -> dict:
@@ -154,6 +155,11 @@ class Installer:
         tmp.write_text(json.dumps(self.registry, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.paths.installed)
         self.emit({"type": "install.changed", "installed": self.status()})
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                pass
 
     def installed_models(self) -> set[str]:
         return {k for k, v in self.registry["models"].items() if Path(v.get("main", "")).exists()}
