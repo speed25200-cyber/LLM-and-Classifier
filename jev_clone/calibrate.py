@@ -16,6 +16,9 @@ pour cette question (empreinte : type, consigne, options) lue sur un etat de mem
 computer use, jamais etiquetes ici, restent lus bruts (T = 1) et gardent le sens de leurs seuils fixes.
 Les seuils par question sont calcules APRES la temperature, sur la statistique de la porte (fusion.gate_statistic :
 probabilite de l'option retenue) ; une question qu'aucun seuil ne rend assez precise recoit `null` : toujours escalader.
+S'y ajoute un seuil par decision (questions[q]["gates"][option]) : precision des seules lectures qui retiennent cette option
+(Prophet ne prend seul que la voie directe 'oui', 'sans reflexion', 'risque 0' : les 'non' justes ne comptent pas pour elles).
+meta.version = CAL_VERSION : un fichier sans version porte des seuils perimes (readout.Calibration.stale_thresholds).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from jev_clone.fusion import gate_statistic
-from jev_clone.readout import Calibration, probs_to_logits, question_fingerprint, softmax, state_keys
+from jev_clone.readout import CAL_VERSION, Calibration, probs_to_logits, question_fingerprint, softmax, state_keys
 
 SEEDS = Path(__file__).parent / "seeds" / "prophet_seeds.jsonl"   # graines etiquetees de Prophet, livrees avec le paquet
 
@@ -220,7 +223,8 @@ def fit(per_kind: dict, per_qid: dict, target_precision: float = 0.95, min_per_q
         P = [softmax(l, T) for l in rows]
         conf = np.array([gate_statistic(p) for p in P])
         ok = np.array([float(p.argmax() == g) for p, g in zip(P, labels)])
-        cal.questions[qid] = {"T": T, "kind": kind, "fp": fp, "state": keys, "n": len(rows)}
+        cal.questions[qid] = {"T": T, "kind": kind, "fp": fp, "state": keys, "n": len(rows),
+                              "gates": option_gates(P, labels, target_precision)}
         cal.thresholds[qid] = threshold_for_precision(conf, ok, target_precision)   # admet exactement l'ensemble evalue
         a = after.setdefault(kind, ([], []))
         a[0].extend(P); a[1].extend(labels)
@@ -230,6 +234,16 @@ def fit(per_kind: dict, per_qid: dict, target_precision: float = 0.95, min_per_q
             reports[kind] = {"before": report(np.stack([softmax(l) for l in pad(rows)]), np.array(labels)),
                              "after": report(pad_probs(P), np.array(y))}
     return cal, reports
+
+
+def option_gates(P: list[np.ndarray], labels, target: float = 0.95) -> dict[str, float | None]:
+    """Seuil par decision : pour chaque option, sur les seules lectures qui la retiennent (argmax), plus petit seuil de sa
+    probabilite tel que ces decisions soient justes a `target` ; None = jamais assez precise (ou jamais retenue) : ne jamais
+    la prendre seule. Les 'non' surs et justes ne portent plus la precision de la voie directe ('oui')."""
+    Pm, y = pad_probs(P), np.asarray(labels)
+    pred = Pm.argmax(1)
+    return {str(k): (threshold_for_precision(Pm[pred == k, k], (y[pred == k] == k).astype(float), target) if (pred == k).any() else None)
+            for k in range(Pm.shape[1])}
 
 
 def pad_probs(rows: list[np.ndarray]) -> np.ndarray:
@@ -247,7 +261,7 @@ def calibrate(engine, examples: list[dict], target_precision: float = 0.95, on_p
         raise ValueError("aucun exemple etiquete exploitable")
     cal, reports = fit(per_kind, per_qid, target_precision)
     cal.meta = {**{k: v for k, v in meta.items() if v is not None}, "n": len(examples), "ts": round(time.time(), 1),
-                "target_precision": target_precision, "statistic": "top1",
+                "target_precision": target_precision, "statistic": "top1", "version": CAL_VERSION,
                 "report": {k: {w: r.summary() for w, r in v.items()} for k, v in reports.items()}}
     return cal, reports
 

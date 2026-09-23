@@ -5,8 +5,11 @@ Deux reglages post-hoc rendent la lecture d'un LM pre-entraine "calibree" :
     question : meme nom, meme consigne et memes options, lue sur un etat de meme forme. Toute autre question (garde-fou,
     verification, voix, computer use) reste lue brute (T = 1) tant qu'elle n'a pas ses propres donnees etiquetees.
   * une statistique de `confidence` (TypeSafe : "a quel point la distribution est piquee")
-Compatibilite : un ancien fichier (temperature par primitive + seuils) ne s'applique qu'aux questions de ses seuils ;
-une calibration sans aucune question (entrainement, jev serve) garde une temperature par primitive pour tout.
+Compatibilite : un ancien fichier (temperature par primitive + seuils) ne s'applique qu'aux questions de ses seuils (celles
+du pre-tour de Prophet reconnues a leur empreinte si le fichier vient de ses graines, les autres par leur nom).
+Points d'entree (Studio, jev prophet, exemples, jev serve, jev decide : load_calibration) : une temperature seule (generique,
+sans question ajustee) n'y est jamais appliquee (T = 1) ; un agent (Studio, jev prophet, exemples) n'applique que les questions
+reconnues sur leur forme d'etat, et jamais des seuils d'une version precedente (meta.version < CAL_VERSION) : signale.
 """
 
 from __future__ import annotations
@@ -15,20 +18,26 @@ import functools
 import hashlib
 import json
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from pydantic import TypeAdapter
 
+from jev_clone.presets import META
 from jev_clone.prompt import Branch, render_text
 from jev_clone.schema import ChoiceAnswer, NoulAnswer, Question, ScoreAnswer, ScoreQuestion
 
 
 KINDS = ("noul", "choice", "score")
 LEGACY_STATE = ("request",)   # forme des etats des graines de Prophet (anciens fichiers : questions du pre-tour)
+# 2 : seuils sans ex aequo + seuil par decision (questions[q]["gates"], precision des seules lectures qui la retiennent).
+# Sans version : seuils d'une version precedente (ex aequo ignores, ou porte fixee sur les deux reponses) : a recalculer.
+CAL_VERSION = 2
 _QUESTION = TypeAdapter(Question)
+_AGENT_WHY = "elle toucherait aussi le garde-fou, la voix et le computer use"
 
 
 @functools.lru_cache(maxsize=512)
@@ -59,11 +68,12 @@ class Calibration:
     # par primitive : ajustee sur tout l'ensemble etiquete (rapports, repli des questions a peu d'exemples) ; appliquee a
     # toutes les questions seulement par une calibration generique (ni `questions` ni `thresholds`)
     temperature: dict[str, float] = field(default_factory=lambda: {"noul": 1.0, "choice": 1.0, "score": 1.0})
-    # seuil de la porte par question, sur la statistique de fusion.gate_statistic (probabilite de l'option retenue,
-    # apres temperature) ; None = aucun seuil n'atteint la precision visee : toujours escalader
+    # seuil de la porte par question (FusionRouter), sur la statistique de fusion.gate_statistic (probabilite de l'option
+    # retenue, apres temperature) ; None = aucun seuil n'atteint la precision visee : toujours escalader
     thresholds: dict[str, float | None] = field(default_factory=dict)
-    meta: dict = field(default_factory=dict)      # modele, nombre d'exemples, ECE avant / apres, source...
-    # temperature par question, appliquee a elle seule : {qid: {"T", "kind", "fp" (empreinte), "state" (cles d'etat), "n"}}
+    meta: dict = field(default_factory=dict)      # modele, nombre d'exemples, ECE avant / apres, source, version...
+    # temperature par question, appliquee a elle seule : {qid: {"T", "kind", "fp" (empreinte), "state" (cles d'etat), "n",
+    # "gates" ({option: seuil} : precision des seules lectures qui retiennent cette option ; portes de Prophet)}}
     questions: dict[str, dict] = field(default_factory=dict)
     _legacy: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -84,15 +94,61 @@ class Calibration:
 
     def scope(self) -> dict[str, dict]:
         """Questions ajustees. Ancien format (sans `questions`) : celles des seuils, a la temperature de leur primitive ;
-        les questions du pre-tour de Prophet y sont reconnues a leur empreinte et a la forme des graines."""
+        fichier des graines de Prophet (direct, clarify, intent ou language parmi ses seuils) : ses questions du pre-tour y
+        sont reconnues a leur empreinte et a la forme des graines (le `risk` du garde-fou reste brut). Autre jeu de donnees
+        (tickets, routage avec needs_reasoning / risk) : toutes par leur nom, comme leurs seuils (jev serve)."""
         if self.questions or not self.thresholds:
             return self.questions
         key = tuple(self.thresholds)
         if self._legacy is None or self._legacy[0] != key:
             turn = _prophet_turn()
+            seeds = any(q in turn and q not in META for q in key)
             self._legacy = (key, {qid: ({"T": None, "kind": turn[qid]["type"], "fp": question_fingerprint(turn[qid]),
-                                         "state": list(LEGACY_STATE)} if qid in turn else {"T": None}) for qid in key})
+                                         "state": list(LEGACY_STATE)} if seeds and qid in turn else {"T": None}) for qid in key})
         return self._legacy[1]
+
+    @property
+    def version(self) -> int:
+        v = self.meta.get("version")
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+    @property
+    def stale_thresholds(self) -> bool:
+        """Seuils d'une version precedente de calibrate() : ex aequo ignores (ancien format), ou porte fixee sur les deux
+        reponses alors que Prophet n'agit que sur l'une (voie directe : 'oui'). Un agent ne les applique pas (a recalculer)."""
+        return bool(self.thresholds) and self.version < CAL_VERSION
+
+    def for_agent(self) -> tuple["Calibration", str]:
+        """Ce qu'un agent peut appliquer (Studio, jev prophet, exemples : le meme S1 lit aussi le garde-fou, la voix, le
+        computer use) -> (calibration, raison si rien ne s'applique). Jamais une temperature hors des questions ajustees :
+        temperature seule (generique) ignoree ; entree sans forme d'etat connue (etats texte, formes disjointes) ignoree (elle
+        toucherait le `risk` du garde-fou) ; ancien format : questions du pre-tour seulement ; seuils perimes ignores."""
+        if self.generic:
+            return (Calibration(meta=dict(self.meta)), "calibration generique (temperature seule, sans question ajustee) : "
+                    f"ignoree (T = 1), {_AGENT_WHY}") if self.is_active() else (self, "")
+        stale = self.stale_thresholds
+        if self.questions:
+            keep = {q: e for q, e in self.questions.items() if e.get("state")}
+        else:
+            keep = {q: {**e, "T": self.t(e["kind"])} for q, e in self.scope().items() if e.get("fp")}
+        if not keep:
+            names = ", ".join(list(self.questions or self.thresholds)[:6])
+            return Calibration(meta=dict(self.meta)), (f"aucune question du fichier ({names}) n'est reconnue ici (question du pre-tour "
+                                                       f"de Prophet, ou lue sur un etat de forme connue) : ignoree (T = 1), {_AGENT_WHY}")
+        if stale:   # portes par defaut : jamais un seuil perime applique en silence (l'etat le signale)
+            keep = {q: {k: v for k, v in e.items() if k != "gates"} for q, e in keep.items()}
+        thr = {} if stale else {q: v for q, v in self.thresholds.items() if q in keep}
+        return Calibration(temperature=dict(self.temperature), thresholds=thr, meta=dict(self.meta), questions=keep), ""
+
+    def for_service(self) -> tuple["Calibration", str]:
+        """Ce qu'un service de decision applique (jev serve, jev decide) -> (calibration, avertissement) : temperature seule
+        ignoree (T = 1) ; seuils de l'ancien format (ex aequo ignores) appliques avec leur temperature, mais signales."""
+        if self.generic and self.is_active():
+            return Calibration(meta=dict(self.meta)), ("calibration generique (temperature seule, sans question ajustee) : ignoree "
+                                                       "(T = 1), elle s'appliquerait a des questions sur lesquelles elle n'a pas ete ajustee")
+        if self.thresholds and not self.questions:
+            return self, "seuils de l'ancien format (calcules sans tenir compte des ex aequo) : appliques tels quels"
+        return self, ""
 
     def entry(self, qid: str | None, q=None, state=None) -> dict | None:
         """Entree de calibration qui vaut pour cette question lue sur cet etat, sinon None (lecture brute)."""
@@ -116,16 +172,22 @@ class Calibration:
             return 1.0
         return float(e["T"]) if e.get("T") is not None else self.t(e.get("kind") or kind or "")
 
-    def gate(self, qid: str, q=None, state=None, default=None):
-        """Seuil calibre d'une porte si cette question est calibree ici (inf = ne jamais agir seul), sinon `default`."""
-        if qid not in self.thresholds or self.entry(qid, q, state) is None:
+    def gate(self, qid: str, q=None, state=None, default=None, option: int | None = None):
+        """Seuil calibre d'une porte si cette question est calibree ici (inf = ne jamais agir seul), sinon `default`.
+        option : decision prise seule (index de l'option retenue, 0 = oui pour un noul) -> seuil ajuste sur les seules lectures
+        qui la retiennent (precision de CETTE decision) ; fichier sans seuil par decision : seuil de la question."""
+        e = self.entry(qid, q, state)
+        if e is None:
             return default
-        return self.threshold(qid, 0.0)
+        if option is not None and isinstance(e.get("gates"), dict):
+            v = e["gates"].get(str(option))
+            return math.inf if v is None else float(v)
+        return self.threshold(qid, 0.0) if qid in self.thresholds else default
 
     def is_active(self) -> bool:
         """Une temperature autre que 1 ou un seuil peut s'appliquer."""
         return (bool(self.thresholds) or any(abs(v - 1.0) > 1e-9 for v in self.temperature.values())
-                or any(abs(float(e.get("T") or 1.0) - 1.0) > 1e-9 for e in self.questions.values()))
+                or any(abs(float(e.get("T") or 1.0) - 1.0) > 1e-9 or e.get("gates") for e in self.questions.values()))
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
@@ -155,8 +217,13 @@ class Calibration:
                 raise ValueError(f"temperature de la question '{k}' invalide : {T!r} (nombre entre 0,01 et 100 attendu)")
             if e.get("kind") not in KINDS or not isinstance(e.get("fp") or "", str) or not isinstance(e.get("state") or [], list):
                 raise ValueError(f"question '{k}' : kind ({', '.join(KINDS)}), fp (texte) et state (liste) attendus")
+            gates = e.get("gates")
+            if gates is not None and (not isinstance(gates, dict) or any(
+                    v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= float(v) <= 1.0) for v in gates.values())):
+                raise ValueError(f"question '{k}' : gates {{option: seuil entre 0 et 1, ou null}} attendu")
             questions[str(k)] = {"T": float(T), "kind": e["kind"], "fp": e.get("fp"),
-                                 "state": None if e.get("state") is None else [str(x) for x in e["state"]], "n": e.get("n")}
+                                 "state": None if e.get("state") is None else [str(x) for x in e["state"]], "n": e.get("n"),
+                                 **({} if gates is None else {"gates": {str(o): None if v is None else float(v) for o, v in gates.items()}})}
         meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
         return cls(temperature=temp, thresholds={str(k): (None if v is None else float(v)) for k, v in thr.items()}, meta=dict(meta),
                    questions=questions)
@@ -178,6 +245,22 @@ class Calibration:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
         tmp.replace(path)
+
+
+def load_calibration(path: str | Path | None, agent: bool = True, warn: Callable[[str], None] | None = None) -> Calibration:
+    """Calibration d'un point d'entree : agent (jev prophet, exemples : Calibration.for_agent) ou service (jev serve, jev decide :
+    for_service). Ce qui est ignore ou douteux est dit (stderr par defaut), jamais en silence."""
+    say = warn or (lambda m: print(m, file=sys.stderr))
+    if path is not None and not Path(path).exists():
+        say(f"calibration {path} introuvable : lecture brute (T = 1)")
+    cal = Calibration.load(path)
+    out, why = cal.for_agent() if agent else cal.for_service()
+    if agent and not why and cal.stale_thresholds:
+        why = ("seuils calcules par une version precedente (ex aequo ignores, ou porte fixee sur les deux reponses) : ignores, "
+               "portes par defaut")
+    if why:
+        say(f"calibration {path} : {why} ; recalibrez (python -m jev_clone.calibrate --data <exemples etiquetes>)")
+    return out
 
 
 def softmax(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
