@@ -88,8 +88,8 @@ Dossier de donnees (identique a `prophet_studio.config.data_dir()`) : `%LOCALAPP
 | `core://log` | evenement | `{ line: string }` pour chaque ligne de stdout / stderr du coeur (et `[bureau] ...` de la coquille) |
 | `shortcut://ptt` | evenement (vers la fenetre `main`) | `{ state: "pressed" \| "released" }` ; a l'appui, la fenetre est aussi affichee et prend le focus |
 
-* `status: "ready"` n'est emis qu'une fois `/api/health` joignable (le coeur imprime `PROPHET_READY` juste
-  avant d'ouvrir son port). Appeler `core_info` au demarrage puis ecouter `core://status` : l'evenement peut
+* `status: "ready"` n'est emis qu'une fois `/api/health` joignable (le coeur n'imprime `PROPHET_READY` qu'une
+  fois son port a l'ecoute ; la verification reste une securite). Appeler `core_info` au demarrage puis ecouter `core://status` : l'evenement peut
   partir avant que l'interface ne soit chargee.
 * Le **jeton** ne change pas pendant la vie de l'application ; l'**url** (port libre) change a chaque
   (re)demarrage du moteur : la reprendre a chaque `ready`. `logs` contient les 200 dernieres lignes.

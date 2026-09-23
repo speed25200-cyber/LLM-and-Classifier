@@ -102,11 +102,20 @@ def main(argv=None) -> None:
     atexit.register(lambda: paths.core_info.unlink(missing_ok=True))
 
     print(f"Prophet Studio {'(demo) ' if args.demo else ''}-> {url}", flush=True)
-    print(f"PROPHET_READY {json.dumps({'url': url, 'port': port})}", flush=True)
-    if not args.no_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False))
+
+    def announce():
+        # PROPHET_READY et le navigateur seulement une fois le port a l'ecoute (machine lente, premier lancement)
+        t0 = time.time()
+        while not server.started and time.time() - t0 < 120:
+            time.sleep(0.05)
+        if server.started:
+            print(f"PROPHET_READY {json.dumps({'url': url, 'port': port})}", flush=True)
+            if not args.no_browser:
+                webbrowser.open(url)
+    threading.Thread(target=announce, daemon=True).start()
+    server.run()
 
 
 if __name__ == "__main__":

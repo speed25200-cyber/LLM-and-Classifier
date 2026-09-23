@@ -210,3 +210,25 @@ def test_models_start_by_themselves_once_installed(tmp_path, monkeypatch):
     st.installer.registry["models"][st.plan().s2.model_id] = {"main": str(model), "role": "s2"}
     st.installer._save()
     assert started == [True]
+
+
+def test_demo_runs_without_any_gpu(tmp_path, monkeypatch):
+    """--demo sur un PC sans carte NVIDIA : le planificateur choisit un autre modele, la demo doit quand meme demarrer."""
+    from prophet_studio import hardware
+    monkeypatch.delenv("PROPHET_FAKE_GPU", raising=False)
+    monkeypatch.setattr(hardware, "_nvml_gpus", lambda: None)
+    monkeypatch.setattr(hardware, "_smi_gpus", lambda: [])
+    monkeypatch.setenv("FAKE_LLAMA_TPS", "0")
+    paths = Paths(tmp_path / "home")
+    paths.settings.write_text(json.dumps({"s2_port": free_port(), "s1_port": free_port(), "voice": {"enabled": False}}))
+    st = Studio(paths, TOKEN, 7878, demo=True)
+    try:
+        assert st.hw.gpu is None and st.plan().backend == "cpu"
+        assert not st.recommended_missing_core()
+        st.start_runtime()
+        t0 = time.time()
+        while st.runtime.state not in ("ready", "degraded", "error") and time.time() - t0 < 40:
+            time.sleep(0.1)
+        assert st.runtime.state in ("ready", "degraded"), st.runtime.message
+    finally:
+        st.runtime.stop()

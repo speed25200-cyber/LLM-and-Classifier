@@ -200,7 +200,7 @@ Verifie ici (sans GPU) :
   prepare Python 3.11 et les dependances ; `cargo clippy` propre aussi pour les cibles Windows et macOS ;
 * `install.sh` (installation reelle, mise a jour en place) et `install.ps1` (analyse et chaine zip -> uv sync ->
   lanceur executees sous PowerShell 7) ;
-* 102 tests (`pytest`) : 98 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
+* 103 tests (`pytest`) : 99 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
 
 Non verifie ici (pas de GPU ni d'acces a Hugging Face / aux releases GitHub depuis l'environnement de redaction) :
 * les debits reels sur RTX 5060 (estimations ; bouton **Mesurer** et `eval/SCOREBOARD.md` pour les remplacer) ;

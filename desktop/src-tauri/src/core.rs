@@ -26,7 +26,7 @@ const MAX_LOG_LINES: usize = 200;
 const READY_PREFIX: &str = "PROPHET_READY ";
 /// Delai laisse au coeur pour s'arreter proprement (il arrete aussi les llama-server).
 const STOP_GRACE: Duration = Duration::from_secs(8);
-/// `PROPHET_READY` est imprime juste avant que uvicorn n'ouvre le port : on attend `/api/health`.
+/// `PROPHET_READY` suit l'ouverture du port ; `/api/health` confirme que le coeur repond vraiment.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(250);
 

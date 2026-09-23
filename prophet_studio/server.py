@@ -78,7 +78,14 @@ class Studio:
         from prophet_studio.config import Settings
         if self.settings.get().workspace == Settings().workspace:   # la demo n'ecrit jamais dans le vrai ~/Prophet
             self.settings.update({"workspace": str(self.paths.root / "workspace")})
-        for mid in ("bonsai2-27b-ptq1", "ternary-1.7b"):
+        # les modeles que le planificateur choisit pour CETTE machine (Bonsai 8B sans GPU...) : la demo demarre partout
+        ids = ["bonsai2-27b-ptq1", "ternary-1.7b"]
+        try:
+            p = self.plan()
+            ids += [sp.model_id for sp in (p.s2, p.s1) if sp is not None and sp.model_id not in ids]
+        except Exception:
+            pass
+        for mid in ids:
             f = self.paths.models / mid / f"{mid}-demo.gguf"
             f.parent.mkdir(parents=True, exist_ok=True)
             f.touch()
