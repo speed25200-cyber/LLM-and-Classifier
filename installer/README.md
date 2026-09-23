@@ -28,6 +28,10 @@ Page [Releases](https://github.com/speed25200-cyber/LLM-and-Classifier/releases)
 * **Linux** : `.AppImage` (rendre executable puis lancer) ou `.deb` (`sudo apt install ./Prophet*.deb`).
 * **macOS (Apple Silicon)** : `.dmg` ; application non notarisee : clic droit > Ouvrir au premier lancement.
 
+Avant la premiere release, ou pour la toute derniere version : onglet **Actions** du depot, workflow **Bureau**,
+derniere execution reussie, section *Artifacts* (`prophet-studio-x86_64-pc-windows-msvc` contient le `.exe` et le
+`.msi`). Ces paquets sont reconstruits a chaque modification de l'application de bureau.
+
 Le premier lancement prepare Python et les dependances (1 a 3 minutes, progression affichee), puis l'assistant
 prend le relais. Fermer la fenetre quitte Prophet Studio et libere la carte graphique.
 

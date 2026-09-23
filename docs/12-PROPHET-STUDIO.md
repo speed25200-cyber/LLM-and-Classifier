@@ -198,6 +198,9 @@ Verifie ici (sans GPU) :
   (CSP et IPC), jeton et origine `tauri://localhost`, redemarrage automatique apres un plantage, fermeture en
   moins d'une seconde avec arret du coeur et des llama-server, `--parent-pid`, raccourci global ; uv embarque qui
   prepare Python 3.11 et les dependances ; `cargo clippy` propre aussi pour les cibles Windows et macOS ;
+* les installateurs construits par la CI GitHub sur les trois systemes : `.exe` NSIS et `.msi` (Windows x64),
+  `.deb` et `.AppImage` (Linux), `.dmg` (macOS Apple Silicon) ; tests Python sous Linux **et Windows**, interface
+  et voix pilotees par Chromium comprises ;
 * `install.sh` (installation reelle, mise a jour en place) et `install.ps1` (analyse et chaine zip -> uv sync ->
   lanceur executees sous PowerShell 7) ;
 * 103 tests (`pytest`) : 99 tournent sans GPU (dont deux pilotes par Chromium : tour d'agent, voix), 4 attendent un vrai llama-server.
