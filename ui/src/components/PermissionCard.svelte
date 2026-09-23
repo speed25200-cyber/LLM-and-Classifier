@@ -1,14 +1,24 @@
 <script module lang="ts">
   export const TOOL_FR: Record<string, string> = { write_file: "ecrire un fichier", edit_file: "modifier un fichier", run_command: "executer une commande",
-    python: "executer du Python", create_tool: "creer un nouvel outil", browse: "naviguer sur le web", desktop: "piloter le bureau" };
+    python: "executer du Python", create_tool: "creer un nouvel outil", browse: "naviguer sur le web", desktop: "piloter le bureau",
+    desktop_step: "action sur le bureau", browse_step: "action dans le navigateur" };
   export const RISK_FR: Record<string, string> = { readonly: "lecture seule", workspace_write: "ecriture locale", destructive: "destructif", privileged: "privilegie", exfiltration: "sortie de donnees" };
+  const RISKY = ["destructive", "privileged", "exfiltration"];
+
+  /** Autorisation memorisee qui ne peut plus rien autoriser : classe dangereuse (arret obligatoire), ou pas du computer use
+   *  sans classe (ancienne regle : un pas est toujours juge par le clone). Revocable, affichee comme telle. */
+  export function grantInert(g: string): boolean {
+    const i = g.indexOf(":");
+    return i < 0 ? g.endsWith("_step") : RISKY.includes(g.slice(i + 1));
+  }
 
   /** Autorisation memorisee : "run_command:readonly" -> "executer une commande · lecture seule" ; "write_file" -> action non jugee. */
   export function grantLabel(g: string): string {
     const i = g.indexOf(":");
     const tool = i < 0 ? g : g.slice(0, i);
     const cls = i < 0 ? "" : g.slice(i + 1);
-    return `${TOOL_FR[tool] ?? tool} · ${cls ? (RISK_FR[cls] ?? cls) : "sans jugement"}`;
+    const label = `${TOOL_FR[tool] ?? tool} · ${cls ? (RISK_FR[cls] ?? cls) : "sans jugement"}`;
+    return grantInert(g) ? `${label} (sans effet)` : label;
   }
 </script>
 
@@ -27,12 +37,15 @@
   const pending = $derived(!b.decision);
   // jugee par le clone ? (anciennes transcriptions : "workspace_write" sans s1_consulted etait une valeur de remplissage)
   const judged = $derived(j.s1_consulted === true || (j.s1_consulted == null && !!j.tool_risk && j.tool_risk !== "workspace_write"));
-  // arret obligatoire (danger probable, politique, classifieur en panne, action vue en partie) : jamais de « toujours »
+  // arret obligatoire (danger probable, politique, classifieur en panne, action vue en partie, code invisible) : jamais de « toujours »
   const hard = $derived(!!j.hard_stop);
-  const cls = $derived(typeof j.grant === "string" && j.grant.includes(":") ? j.grant.slice(j.grant.indexOf(":") + 1) : "");
+  // « toujours » seulement si le serveur propose une cle : ni arret obligatoire, ni verdict incertain du clone
+  const grantable = $derived(typeof j.grant === "string" && !hard);
+  const unsure = $derived(judged && !hard && !grantable && !!j.needs_confirmation);
+  const cls = $derived(grantable && j.grant.includes(":") ? j.grant.slice(j.grant.indexOf(":") + 1) : "");
 
   function decide(allow: boolean, remember = false) {
-    if (pending) app.respondPermission(b.id, allow, remember && !hard);
+    if (pending) app.respondPermission(b.id, allow, remember && grantable);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -42,7 +55,7 @@
     if (field && (field.tagName === "INPUT" || app.composerText.trim())) return;
     const k = e.key.toLowerCase();
     if (k === "y" || k === "o") (e.preventDefault(), decide(true));
-    else if ((k === "a" || k === "t") && !hard) (e.preventDefault(), decide(true, true));
+    else if ((k === "a" || k === "t") && grantable) (e.preventDefault(), decide(true, true));
     else if (k === "n" || k === "r") (e.preventDefault(), decide(false));
   }
 </script>
@@ -65,11 +78,14 @@
           <span class="chip {j.risk >= 2 ? 'warn' : ''}">risque {num(j.risk ?? 0, 1)}/3</span>
           {#if j.policy_violation >= 0.3}<span class="chip warn">politique {pct(j.policy_violation)}</span>{/if}
           {#if j.partial}<span class="chip warn">trop long pour etre juge en entier</span>{/if}
+          {#if j.unseen?.length}<span class="chip warn" title={j.unseen.join(", ")}>code lance invisible pour le juge</span>{/if}
+          {#if j.meta_skills}<span class="chip warn">vise les outils de Prophet (.prophet/skills)</span>{/if}
           {#if j.latency_ms}<span class="chip">juge en {num(j.latency_ms)} ms</span>{/if}
         {:else}
           <span class="chip">non juge · mode « toujours demander »</span>
         {/if}
-        {#if hard && pending}<span class="chip warn" title="Ni « toujours » ni une autorisation memorisee ne s'appliquent">confirmation obligatoire</span>{/if}
+        {#if hard && pending}<span class="chip warn" title="Ni « toujours » ni une autorisation memorisee ne s'appliquent">confirmation obligatoire</span>
+        {:else if unsure && pending}<span class="chip" title="« Toujours » ne couvre que les verdicts surs du classifieur">verdict incertain</span>{/if}
       </div>
     </div>
   </div>
@@ -95,7 +111,7 @@
   {#if pending}
     <div class="acts">
       <button class="btn primary sm" onclick={() => decide(true)}>Autoriser <span class="kbd">Y</span></button>
-      {#if !hard}
+      {#if grantable}
         <button class="btn sm" onclick={() => decide(true, true)} title="Revocable dans le panneau Espace de travail">
           Toujours pour cet outil{cls ? ` (${RISK_FR[cls] ?? cls})` : ""} <span class="kbd">A</span>
         </button>
