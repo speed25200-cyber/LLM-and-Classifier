@@ -2,13 +2,21 @@
 # macOS Apple Silicon (dmg).
 # * etiquette v* : brouillon de release GitHub avec les paquets et prophet-studio-web.zip (interface
 #   precompilee, dernier recours des installateurs en ligne de commande) ; publier le brouillon a la main ;
-# * lancement manuel (workflow_dispatch) : paquets en artefacts du workflow, sans release.
+# * lancement manuel (workflow_dispatch), ou push qui modifie la coquille de bureau : paquets en artefacts
+#   du workflow, sans release (les installateurs restent verifies a chaque changement de desktop/).
 name: Bureau
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+    branches: ["**"]
+    # ignores pour les etiquettes : une etiquette v* construit toujours
+    paths: ["desktop/**", ".github/workflows/desktop.yml", "uv.lock"]
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
