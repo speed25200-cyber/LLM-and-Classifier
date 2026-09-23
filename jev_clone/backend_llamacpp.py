@@ -28,6 +28,7 @@ import concurrent.futures as cf
 import contextlib
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -81,6 +82,9 @@ class _Cut:
                     if s is not None:
                         with contextlib.suppress(OSError):
                             s.shutdown(socket.SHUT_RDWR)
+                        if os.name == "nt":   # Windows : shutdown ne reveille pas un recv en attente, la fermeture si
+                            with contextlib.suppress(OSError):
+                                s.close()
 
     def track(self, r) -> None:
         """Socket de la reponse : une connexion fermee apres le corps (HTTP/1.0, Connection: close) la cede a la reponse."""

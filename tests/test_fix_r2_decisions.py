@@ -389,7 +389,7 @@ def test_ui_reducer_mirrors_python_after_a_reroute(tmp_path):
         'console.log(JSON.stringify(out));\n', encoding="utf-8")
     data = tmp_path / "events.json"
     data.write_text(json.dumps([ev, ev2]), encoding="utf-8")
-    r = subprocess.run([_node(), "--experimental-strip-types", "--no-warnings", str(script), str(data)], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([_node(), "--experimental-strip-types", "--no-warnings", str(script), str(data)], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
     ts_items = json.loads(r.stdout)
     assert ts_items[1]["shown"] is False     # avant : reponse finale cachee (egale au texte ecarte de la voie directe)

@@ -249,7 +249,7 @@ def _node(work: Path, body: str):
     script.write_text('import { pathToFileURL } from "node:url";\n'
                       'const lib = (n) => import(pathToFileURL(`${process.argv[2]}/${n}.ts`).href);\n' + body, encoding="utf-8")
     for flags in ([], ["--experimental-strip-types"]):
-        p = subprocess.run([node, *flags, str(script), str(lib)], capture_output=True, text=True, timeout=60)
+        p = subprocess.run([node, *flags, str(script), str(lib)], capture_output=True, text=True, encoding="utf-8", timeout=60)
         if p.returncode == 0:
             return json.loads(p.stdout.strip().splitlines()[-1])
     if "ERR_UNKNOWN_FILE_EXTENSION" in p.stderr or "bad option" in p.stderr:

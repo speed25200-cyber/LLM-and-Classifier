@@ -340,7 +340,7 @@ def _node_reduce(work: Path, events: list[dict]) -> list:
                       'console.log(JSON.stringify(item.blocks.filter((b) => b.type === "tool").map((b) => b.cu ?? null)));\n', encoding="utf-8")
     for flags in ([], ["--experimental-strip-types"]):
         p = subprocess.run([node, *flags, str(script), str(lib / "transcript.ts"), str(tmp_path / "events.json")],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
         if p.returncode == 0:
             return json.loads(p.stdout.strip().splitlines()[-1])
     pytest.skip(f"Node ne sait pas executer du TypeScript : {p.stderr[-300:]}")
@@ -373,7 +373,7 @@ def ui_web(tmp_path_factory):
         pytest.skip("interface non constructible ici (cd ui && npm ci)")
     out = tmp_path_factory.mktemp("web")
     p = subprocess.run([str(vite), "build", "--outDir", str(out), "--emptyOutDir", "--logLevel", "error"], cwd=ROOT / "ui",
-                       capture_output=True, text=True, timeout=600)
+                       capture_output=True, text=True, encoding="utf-8", timeout=600)
     assert p.returncode == 0, p.stderr[-2000:]
     return out
 
